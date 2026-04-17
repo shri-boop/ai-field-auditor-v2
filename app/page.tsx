@@ -110,12 +110,6 @@ export default function FirescanDashboard() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950">
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 px-5 py-2 rounded-full glass border border-amber-500/10">
-        <p className="text-xs uppercase tracking-widest text-amber-400/70 font-semibold whitespace-nowrap">
-          Engineered by <span className="text-amber-300">Arvami Solutionz</span>
-        </p>
-      </div>
-
       <div className="relative z-10 p-8">
         <div className="max-w-7xl mx-auto">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
@@ -194,8 +188,14 @@ export default function FirescanDashboard() {
                 </div>
               )}
 
-              <div className="text-xs text-gray-600/60 uppercase tracking-wider font-mono">
+             <div className="text-xs text-gray-600/60 uppercase tracking-wider font-mono">
                 Status: {loading ? 'Processing' : siteId && file ? 'Ready' : 'Incomplete'}
+              </div>
+
+              <div className="pt-4">
+                <p className="text-[10px] uppercase tracking-widest text-amber-500/40 font-semibold">
+                  Engineered by <span className="text-amber-400/60">Arvami Solutionz</span>
+                </p>
               </div>
             </div>
 
