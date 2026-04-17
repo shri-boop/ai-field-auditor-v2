@@ -43,7 +43,7 @@ export default function FirescanDashboard() {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden" style={{background: 'linear-gradient(135deg, #0a1628 0%, #0d2847 50%, #081a2d 100%)'}}>
+    <div className="relative min-h-screen overflow-hidden bg-slate-950">
       {/* Top-right branding */}
       <div className="absolute top-6 right-6 z-20">
         <p className="text-xs uppercase tracking-widest text-amber-400/60 font-semibold">
