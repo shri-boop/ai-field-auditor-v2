@@ -190,11 +190,11 @@
   }
   
   .orange-glow {
-    @apply shadow-[0_0_30px_rgba(249,115,22,0.5)];
+    @apply shadow-[0_0_50px_rgba(255,140,0,0.9)_,_0_0_30px_rgba(255,100,0,0.6)];
   }
   
   .orange-glow-pulse {
-    @apply shadow-[0_0_30px_rgba(249,115,22,0.5)] hover:shadow-[0_0_50px_rgba(249,115,22,0.7)] transition-shadow duration-300;
+    @apply shadow-[0_0_50px_rgba(255,140,0,0.9)_,_0_0_30px_rgba(255,100,0,0.6)] hover:shadow-[0_0_80px_rgba(255,140,0,1)_,_0_0_50px_rgba(255,100,0,0.8)] transition-shadow duration-300;
   }
   
   .radar-pulse {
@@ -226,6 +226,6 @@
   }
   
   .glow-text-orange {
-    @apply text-orange-400 animate-pulse drop-shadow-[0_0_10px_rgba(249,115,22,0.8)];
+    @apply text-orange-500 font-bold animate-pulse drop-shadow-[0_0_15px_rgba(255,140,0,1)] drop-shadow-[0_0_8px_rgba(255,100,0,0.8)];
   }
 }

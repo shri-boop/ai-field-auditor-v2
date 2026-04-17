@@ -105,8 +105,8 @@ export default function FirescanDashboard() {
                   className="hidden"
                 />
                 <div className="flex flex-col items-center justify-center space-y-4">
-                  <div className="p-4 rounded-lg bg-orange-500/10 border border-orange-500/20">
-                    <Upload className="w-8 h-8 text-orange-400" />
+                  <div className="p-4 rounded-lg bg-orange-500/20 border border-orange-500/50">
+                    <Upload className="w-8 h-8 text-orange-400" style={{filter: 'drop-shadow(0 0 8px rgba(255, 140, 0, 0.8))'}} />
                   </div>
                   <div className="text-center">
                     <p className="text-white font-semibold text-sm">UPLOAD EQUIPMENT IMAGE</p>
@@ -128,8 +128,8 @@ export default function FirescanDashboard() {
                 disabled={!siteId || !uploadedImage}
                 className={`w-full h-14 font-bold uppercase tracking-wider text-sm rounded-lg transition-all duration-300 ${
                   siteId && uploadedImage
-                    ? 'bg-gradient-to-b from-orange-600 to-orange-500 orange-glow-pulse hover:shadow-[0_0_60px_rgba(249,115,22,0.8)] text-black'
-                    : 'bg-gradient-to-b from-orange-600/40 to-orange-500/40 text-gray-600 cursor-not-allowed'
+                    ? 'bg-gradient-to-b from-orange-500 to-orange-600 orange-glow-pulse hover:shadow-[0_0_80px_rgba(255,140,0,1)_,_0_0_50px_rgba(255,100,0,0.8)] text-black'
+                    : 'bg-gradient-to-b from-orange-600/30 to-orange-500/30 text-gray-500 cursor-not-allowed'
                 }`}
               >
                 {siteId && uploadedImage ? 'INITIATE AUDIT SEQUENCE' : 'AWAITING INPUT'}
@@ -166,7 +166,7 @@ export default function FirescanDashboard() {
                         cy="50"
                         r="40"
                         fill="none"
-                        stroke="rgba(249, 115, 22, 0.3)"
+                        stroke="rgba(255, 140, 0, 0.4)"
                         strokeWidth="2"
                       />
                       <circle
@@ -175,7 +175,7 @@ export default function FirescanDashboard() {
                         r="40"
                         fill="none"
                         stroke="url(#grad)"
-                        strokeWidth="2"
+                        strokeWidth="3"
                         strokeDasharray="251"
                         strokeDashoffset="0"
                         style={{ animation: 'spin 3s linear infinite' }}
@@ -183,15 +183,15 @@ export default function FirescanDashboard() {
                       <circle
                         cx="50"
                         cy="10"
-                        r="3"
-                        fill="rgba(251, 191, 36, 0.8)"
-                        style={{ filter: 'drop-shadow(0 0 8px rgba(251, 191, 36, 0.8))' }}
+                        r="4"
+                        fill="rgba(255, 140, 0, 1)"
+                        style={{ filter: 'drop-shadow(0 0 12px rgba(255, 140, 0, 1))' }}
                       />
                       <defs>
                         <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor="rgba(251, 191, 36, 0.8)" />
-                          <stop offset="50%" stopColor="rgba(249, 115, 22, 0.6)" />
-                          <stop offset="100%" stopColor="rgba(251, 191, 36, 0)" />
+                          <stop offset="0%" stopColor="rgba(255, 140, 0, 1)" />
+                          <stop offset="50%" stopColor="rgba(255, 100, 0, 0.8)" />
+                          <stop offset="100%" stopColor="rgba(255, 140, 0, 0.3)" />
                         </linearGradient>
                       </defs>
                     </svg>
