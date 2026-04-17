@@ -96,7 +96,7 @@ export default function FirescanDashboard() {
                 className={`relative glass-amber rounded-lg p-12 cursor-pointer transition-all duration-300 ${
                   dragActive ? 'border-amber-400/60 bg-amber-500/5' : 'border-amber-500/20 hover:border-amber-400/40'
                 }`}
-                style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.35), 0 0 60px rgba(255, 140, 0, 0.2) inset'}}
+                style={{boxShadow: '0 4px 15px rgba(255, 140, 0, 0.1)'}}
               >
                 <input
                   id="image-input"
@@ -144,7 +144,7 @@ export default function FirescanDashboard() {
             {/* RIGHT COLUMN - THE INTEL FEED */}
             <div className="flex items-center justify-center min-h-96">
               {state === 'empty' && (
-                <div className="w-full glass rounded-lg p-12 flex flex-col items-center justify-center space-y-6 border-amber-500/20 hover:border-amber-500/30 transition-colors" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.3), 0 12px 60px rgba(255, 140, 0, 0.25)'}}>
+                <div className="w-full glass rounded-lg p-12 flex flex-col items-center justify-center space-y-6 border-amber-500/20 hover:border-amber-500/30 transition-colors" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                   <div className="relative w-20 h-20">
                     <Crosshair className="w-full h-full text-amber-600/40 radar-pulse" />
                   </div>
@@ -221,7 +221,7 @@ export default function FirescanDashboard() {
                   {/* Compliance Status Header */}
                   <div className={`glass rounded-lg p-6 border-2 ${
                     true ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-red-500/40 bg-red-950/20'
-                  }`} style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.3), 0 12px 60px rgba(255, 140, 0, 0.2)'}}>
+                  }`} style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                     <div className="flex items-center justify-between">
                       <h2 className="text-white font-bold uppercase tracking-wider text-sm">
                         Compliance Status
@@ -238,26 +238,26 @@ export default function FirescanDashboard() {
 
                   {/* Site Info Grid */}
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.25)'}}>
+                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">Site ID</p>
                       <p className="text-white font-bold text-lg mt-3 font-mono">{siteId}</p>
                     </div>
-                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.25)'}}>
+                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">AI Confidence</p>
                       <p className="text-white font-bold text-lg mt-3 font-mono">94.2%</p>
                     </div>
-                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.25)'}}>
+                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">Equipment Type</p>
                       <p className="text-white font-bold text-lg mt-3 font-mono">Fire Suppression</p>
                     </div>
-                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.25)'}}>
+                    <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">Timestamp</p>
                       <p className="text-white font-bold text-lg mt-3 font-mono">2026-04-17</p>
                     </div>
                   </div>
 
                   {/* Observations Card */}
-                  <div className="glass rounded-lg p-6 border-white/5" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.3), 0 12px 60px rgba(255, 140, 0, 0.2)'}}>
+                  <div className="glass rounded-lg p-6 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                     <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4">
                       Key Observations
                     </h3>
@@ -267,7 +267,7 @@ export default function FirescanDashboard() {
                   </div>
 
                   {/* Violations Card */}
-                  <div className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10" style={{boxShadow: '0 8px 40px rgba(255, 140, 0, 0.3), 0 12px 60px rgba(255, 140, 0, 0.2)'}}>
+                  <div className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                     <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4 flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse drop-shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
                       Minor Violations
