@@ -43,7 +43,14 @@ export default function FirescanDashboard() {
   };
 
   return (
-    <div className="relative min-h-screen bg-black overflow-hidden">
+    <div className="relative min-h-screen overflow-hidden" style={{background: 'linear-gradient(135deg, #0a1628 0%, #0d2847 50%, #081a2d 100%)'}}>
+      {/* Top-right branding */}
+      <div className="absolute top-6 right-6 z-20">
+        <p className="text-xs uppercase tracking-widest text-amber-400/60 font-semibold">
+          Engineered by <span className="text-amber-300">Arvami Solutionz</span>
+        </p>
+      </div>
+      
       {/* Content wrapper with z-index to appear above grid */}
       <div className="relative z-10 p-8">
         <div className="max-w-7xl mx-auto">
