@@ -1,23 +1,32 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, ChangeEvent } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Upload, Crosshair, AlertCircle } from 'lucide-react';
 
+const WEBHOOK_URL = 'https://n8n.arvamisolutionz.com/webhook/audit-field-photov2';
+
 export default function FirescanDashboard() {
   const [siteId, setSiteId] = useState('');
-  const [uploadedImage, setUploadedImage] = useState<File | null>(null);
-  const [state, setState] = useState<'empty' | 'loading' | 'success'>('empty');
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
+
+  const state = loading ? 'loading' : result ? 'success' : 'empty';
 
   const handleImageDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragActive(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) {
-      setUploadedImage(file);
+    const droppedFile = e.dataTransfer.files[0];
+    if (droppedFile && droppedFile.type.startsWith('image/')) {
+      setFile(droppedFile);
+      setPreview(URL.createObjectURL(droppedFile));
+      setResult(null);
+      setError(null);
     }
   };
 
@@ -26,48 +35,99 @@ export default function FirescanDashboard() {
     input?.click();
   };
 
-  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type.startsWith('image/')) {
-      setUploadedImage(file);
+  const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (selectedFile && selectedFile.type.startsWith('image/')) {
+      setFile(selectedFile);
+      setPreview(URL.createObjectURL(selectedFile));
+      setResult(null);
+      setError(null);
     }
   };
 
-  const handleRunAudit = () => {
-    if (!siteId || !uploadedImage) return;
-    setState('loading');
-    
-    setTimeout(() => {
-      setState('success');
-    }, 3500);
+  const handleRunAudit = async () => {
+    if (!file || !siteId) return;
+
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      // 1. Upload to Vercel Blob
+      const formData = new FormData();
+      formData.append('image', file);
+      const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
+      
+      const uploadText = await uploadRes.text();
+      if (!uploadRes.ok) throw new Error(`Upload failed (${uploadRes.status}): ${uploadText.substring(0, 200)}`);
+      
+      let uploadData;
+      try { uploadData = JSON.parse(uploadText); } 
+      catch (e) { throw new Error(`Upload returned invalid JSON: ${uploadText.substring(0, 200)}`); }
+
+      if (!uploadData.url) throw new Error('Image upload to Blob failed - no URL returned');
+
+      // 2. Send to n8n
+      const webhookRes = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_url: uploadData.url, site_id: siteId }),
+      });
+
+      const webhookText = await webhookRes.text();
+      if (!webhookRes.ok) throw new Error(`n8n Webhook failed (${webhookRes.status}): ${webhookText.substring(0, 200)}`);
+      
+      let data;
+      try { data = JSON.parse(webhookText); } 
+      catch (e) { throw new Error(`n8n returned invalid JSON: ${webhookText.substring(0, 200)}`); }
+
+      console.log("RAW N8N RESPONSE:", data); // <--- ADD THIS LINE
+      setResult(data);
+    } catch (err: any) {
+      setError(err.message || 'Audit sequence failed');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  // Claude returns a flat object
+  const audit = result || {};
+  
+  const isCompliant = audit?.status?.toLowerCase() !== 'non-compliant';
+  const complianceLabel = audit?.status || 'UNKNOWN';
+  const confidence = audit?.confidence || '—';
+  const equipmentType = audit?.equipment_type || '—';
+  
+  // Format the ISO timestamp to a readable string
+  const timestamp = audit?.audit_timestamp 
+    ? new Date(audit.audit_timestamp).toLocaleString('en-IN', { 
+        day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' 
+      })
+    : '—';
+
+  const observations = audit?.observations || 'No observations returned.';
+  const violations = audit?.violations || [];
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950">
-      {/* Top-right branding */}
-      <div className="absolute top-6 right-6 z-20">
-        <p className="text-xs uppercase tracking-widest text-amber-400/60 font-semibold">
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 px-5 py-2 rounded-full glass border border-amber-500/10">
+        <p className="text-xs uppercase tracking-widest text-amber-400/70 font-semibold whitespace-nowrap">
           Engineered by <span className="text-amber-300">Arvami Solutionz</span>
         </p>
       </div>
-      
-      {/* Content wrapper with z-index to appear above grid */}
+
       <div className="relative z-10 p-8">
         <div className="max-w-7xl mx-auto">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
-            {/* LEFT COLUMN - THE TERMINAL */}
+            {/* LEFT COLUMN */}
             <div className="space-y-8">
-              {/* FIRESCAN Logo */}
               <div>
-                <h1 className="text-6xl font-black gold-text gold-glow leading-none">
-                  FIRESCAN
-                </h1>
+                                <h1 className="text-6xl font-black gold-text leading-none" style={{ filter: 'drop-shadow(0 0 10px rgba(255, 170, 0, 0.25))' }}>FIRESCAN</h1>
                 <p className="text-amber-600/60 text-sm uppercase tracking-widest mt-3 font-medium">
                   AI Compliance Command Center
                 </p>
               </div>
 
-              {/* Site ID Input */}
               <div className="space-y-3">
                 <label htmlFor="site-id" className="text-xs uppercase tracking-widest text-amber-400/70 font-semibold">
                   Site ID / Location Code
@@ -80,68 +140,66 @@ export default function FirescanDashboard() {
                     onChange={(e) => setSiteId(e.target.value)}
                     className="glass-amber placeholder:text-gray-600 text-white focus:ring-0 focus:border-amber-400/60 pl-4 h-12 text-sm"
                   />
-                  <div className="absolute inset-0 rounded pointer-events-none border border-amber-500/0 group-focus-within:border-amber-400/40 transition-colors" />
                 </div>
               </div>
 
-              {/* Image Dropzone - Premium Glass */}
               <div
                 onDrop={handleImageDrop}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setDragActive(true);
-                }}
+                onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
                 onDragLeave={() => setDragActive(false)}
                 onClick={handleImageClick}
-                className={`relative glass-amber rounded-lg p-12 cursor-pointer transition-all duration-300 ${
+                className={`relative glass-amber rounded-lg cursor-pointer transition-all duration-300 overflow-hidden ${
                   dragActive ? 'border-amber-400/60 bg-amber-500/5' : 'border-amber-500/20 hover:border-amber-400/40'
                 }`}
-                style={{boxShadow: '0 4px 15px rgba(255, 140, 0, 0.1)'}}
+                style={{ boxShadow: '0 4px 15px rgba(255, 140, 0, 0.1)' }}
               >
-                <input
-                  id="image-input"
-                  type="file"
-                  accept="image/*"
-                  onChange={handleImageChange}
-                  className="hidden"
-                />
-                <div className="flex flex-col items-center justify-center space-y-4">
-                  <div className="p-4 rounded-lg bg-orange-500/20 border border-orange-500/50">
-                    <Upload className="w-8 h-8 text-orange-400" style={{filter: 'drop-shadow(0 0 8px rgba(255, 140, 0, 0.8))'}} />
+                <input id="image-input" type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
+                
+                {preview ? (
+                  <div className="relative">
+                    <img src={preview} alt="Uploaded equipment" className="w-full h-64 object-cover opacity-80" />
+                    <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950 via-slate-950/80 to-transparent p-4">
+                      <p className="text-amber-400 text-xs font-mono truncate">✓ {file?.name}</p>
+                    </div>
                   </div>
-                  <div className="text-center">
-                    <p className="text-white font-semibold text-sm">UPLOAD EQUIPMENT IMAGE</p>
-                    <p className="text-amber-600/50 text-xs mt-2 uppercase tracking-wide">Drag & drop or click</p>
-                  </div>
-                </div>
-                {uploadedImage && (
-                  <div className="mt-4 pt-4 border-t border-amber-500/20">
-                    <p className="text-amber-400 text-xs font-mono">
-                      ✓ {uploadedImage.name}
-                    </p>
+                ) : (
+                  <div className="p-12 flex flex-col items-center justify-center space-y-4">
+                    <div className="p-4 rounded-lg bg-orange-500/20 border border-orange-500/50">
+                    <Upload className="w-8 h-8 text-orange-400" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-white font-semibold text-sm">UPLOAD EQUIPMENT IMAGE</p>
+                      <p className="text-amber-600/50 text-xs mt-2 uppercase tracking-wide">Drag & drop or click</p>
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Initiate Audit Button */}
               <Button
                 onClick={handleRunAudit}
-                disabled={!siteId || !uploadedImage}
+                disabled={!siteId || !file || loading}
                 className={`w-full h-14 font-bold uppercase tracking-wider text-sm rounded-lg transition-all duration-300 ${
-                  siteId && uploadedImage
-                    ? 'bg-gradient-to-b from-orange-500 to-orange-600 orange-glow-pulse hover:shadow-[0_0_80px_rgba(255,140,0,1)_,_0_0_50px_rgba(255,100,0,0.8)] text-black'
+                  siteId && file && !loading
+                    ? 'bg-gradient-to-b from-orange-500 to-orange-600 hover:shadow-[0_0_20px_rgba(255,140,0,0.4)] text-black'
                     : 'bg-gradient-to-b from-orange-600/30 to-orange-500/30 text-gray-500 cursor-not-allowed'
                 }`}
               >
-                {siteId && uploadedImage ? 'INITIATE AUDIT SEQUENCE' : 'AWAITING INPUT'}
+                {loading ? 'PROCESSING...' : siteId && file ? 'INITIATE AUDIT SEQUENCE' : 'AWAITING INPUT'}
               </Button>
 
+              {error && (
+                <div className="flex items-center gap-3 rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-3">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  <p className="text-red-300 text-xs font-mono">{error}</p>
+                </div>
+              )}
+
               <div className="text-xs text-gray-600/60 uppercase tracking-wider font-mono">
-                Status: {siteId && uploadedImage ? 'Ready' : 'Incomplete'}
+                Status: {loading ? 'Processing' : siteId && file ? 'Ready' : 'Incomplete'}
               </div>
             </div>
 
-            {/* RIGHT COLUMN - THE INTEL FEED */}
+            {/* RIGHT COLUMN */}
             <div className="flex items-center justify-center min-h-96">
               {state === 'empty' && (
                 <div className="w-full glass rounded-lg p-12 flex flex-col items-center justify-center space-y-6 border-amber-500/20 hover:border-amber-500/30 transition-colors" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
@@ -149,9 +207,7 @@ export default function FirescanDashboard() {
                     <Crosshair className="w-full h-full text-amber-600/40 radar-pulse" />
                   </div>
                   <div className="text-center">
-                    <p className="text-amber-400/60 uppercase text-xs tracking-widest font-semibold">
-                      awaiting target acquisition
-                    </p>
+                    <p className="text-amber-400/60 uppercase text-xs tracking-widest font-semibold">awaiting target acquisition</p>
                     <p className="text-gray-600 text-xs mt-3">Ready to scan equipment</p>
                   </div>
                 </div>
@@ -159,35 +215,11 @@ export default function FirescanDashboard() {
 
               {state === 'loading' && (
                 <div className="w-full space-y-8 flex flex-col items-center justify-center">
-                  {/* Sci-Fi Spinning Ring */}
                   <div className="relative w-32 h-32">
                     <svg className="w-full h-full glow-ring" viewBox="0 0 100 100">
-                      <circle
-                        cx="50"
-                        cy="50"
-                        r="40"
-                        fill="none"
-                        stroke="rgba(255, 140, 0, 0.4)"
-                        strokeWidth="2"
-                      />
-                      <circle
-                        cx="50"
-                        cy="50"
-                        r="40"
-                        fill="none"
-                        stroke="url(#grad)"
-                        strokeWidth="3"
-                        strokeDasharray="251"
-                        strokeDashoffset="0"
-                        style={{ animation: 'spin 3s linear infinite' }}
-                      />
-                      <circle
-                        cx="50"
-                        cy="10"
-                        r="4"
-                        fill="rgba(255, 140, 0, 1)"
-                        style={{ filter: 'drop-shadow(0 0 12px rgba(255, 140, 0, 1))' }}
-                      />
+                      <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255, 140, 0, 0.4)" strokeWidth="2" />
+                      <circle cx="50" cy="50" r="40" fill="none" stroke="url(#grad)" strokeWidth="3" strokeDasharray="251" strokeDashoffset="0" style={{ animation: 'spin 3s linear infinite' }} />
+                      <circle cx="50" cy="10" r="4" fill="rgba(255, 140, 0, 1)" style={{ filter: 'drop-shadow(0 0 12px rgba(255, 140, 0, 1))' }} />
                       <defs>
                         <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
                           <stop offset="0%" stopColor="rgba(255, 140, 0, 1)" />
@@ -197,41 +229,26 @@ export default function FirescanDashboard() {
                       </defs>
                     </svg>
                   </div>
-
                   <div className="text-center space-y-2">
-                    <p className="glow-text-orange uppercase font-bold text-lg">
-                      ANALYZING VISUAL DATA
-                    </p>
-                    <p className="text-gray-600 text-sm uppercase tracking-wider">
-                      Running NBC 2016 compliance checks
-                    </p>
+                    <p className="glow-text-orange uppercase font-bold text-lg">ANALYZING VISUAL DATA</p>
+                    <p className="text-gray-600 text-sm uppercase tracking-wider">Running NBC 2016 compliance checks</p>
                   </div>
-
-                  <style>{`
-                    @keyframes spin {
-                      from { transform: rotate(0deg); }
-                      to { transform: rotate(360deg); }
-                    }
-                  `}</style>
+                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                 </div>
               )}
 
               {state === 'success' && (
                 <div className="w-full space-y-4">
                   {/* Compliance Status Header */}
-                  <div className={`glass rounded-lg p-6 border-2 ${
-                    true ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-red-500/40 bg-red-950/20'
-                  }`} style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
+                  <div className={`glass rounded-lg p-6 border-2 ${isCompliant ? 'border-emerald-500/40 bg-emerald-950/20' : 'border-red-500/40 bg-red-950/20'}`} style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                     <div className="flex items-center justify-between">
-                      <h2 className="text-white font-bold uppercase tracking-wider text-sm">
-                        Compliance Status
-                      </h2>
+                      <h2 className="text-white font-bold uppercase tracking-wider text-sm">Compliance Status</h2>
                       <span className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border ${
-                        true 
+                        isCompliant 
                           ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 animate-pulse drop-shadow-[0_0_10px_rgba(16,185,129,0.5)]'
-                          : 'bg-red-500/20 border-red-400 text-red-300'
+                          : 'bg-red-500/20 border-red-400 text-red-300 animate-pulse drop-shadow-[0_0_10px_rgba(248,113,113,0.5)]'
                       }`}>
-                        COMPLIANT
+                        {complianceLabel}
                       </span>
                     </div>
                   </div>
@@ -244,45 +261,58 @@ export default function FirescanDashboard() {
                     </div>
                     <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">AI Confidence</p>
-                      <p className="text-white font-bold text-lg mt-3 font-mono">94.2%</p>
+                      <p className="text-white font-bold text-lg mt-3 font-mono">{confidence}</p>
                     </div>
                     <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">Equipment Type</p>
-                      <p className="text-white font-bold text-lg mt-3 font-mono">Fire Suppression</p>
+                      <p className="text-white font-bold text-base mt-3 font-mono">{equipmentType}</p>
                     </div>
                     <div className="glass rounded-lg p-5 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
                       <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">Timestamp</p>
-                      <p className="text-white font-bold text-lg mt-3 font-mono">2026-04-17</p>
+                      <p className="text-white font-bold text-sm mt-3 font-mono">{timestamp}</p>
                     </div>
                   </div>
 
                   {/* Observations Card */}
                   <div className="glass rounded-lg p-6 border-white/5" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
-                    <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4">
-                      Key Observations
-                    </h3>
-                    <p className="text-gray-400 text-sm leading-relaxed">
-                      Equipment demonstrates excellent compliance with NBC 2016 standards. All safety features properly installed and operational. Fire suppression systems functional and within required maintenance schedules. Emergency exits clearly marked and accessible. Lighting meets minimum requirements.
-                    </p>
+                    <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4">Key Observations</h3>
+                    <p className="text-gray-400 text-sm leading-relaxed">{observations}</p>
                   </div>
 
                   {/* Violations Card */}
-                  <div className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
-                    <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse drop-shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
-                      Minor Violations
-                    </h3>
-                    <ul className="space-y-3">
-                      <li className="flex items-start gap-3">
-                        <span className="text-red-400 font-bold text-lg leading-none">•</span>
-                        <span className="text-gray-400 text-sm">Exit signage requires maintenance touch-up on west corridor</span>
-                      </li>
-                      <li className="flex items-start gap-3">
-                        <span className="text-red-400 font-bold text-lg leading-none">•</span>
-                        <span className="text-gray-400 text-sm">Fire extinguisher inspection label slightly faded on Unit 3</span>
-                      </li>
-                    </ul>
-                  </div>
+                  {violations.length > 0 && (
+                    <div className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
+                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4 flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse drop-shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
+                        Violations Detected
+                      </h3>
+                      <ul className="space-y-3">
+                        {violations.map((v: string, i: number) => (
+                          <li key={i} className="flex items-start gap-3">
+                            <span className="text-red-400 font-bold text-lg leading-none">•</span>
+                            <span className="text-gray-400 text-sm">{v}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {violations.length === 0 && (
+                    <div className="glass rounded-lg p-6 border-2 border-emerald-500/30 bg-emerald-950/10" style={{boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)'}}>
+                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-2 flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse drop-shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
+                        Zero Violations
+                      </h3>
+                      <p className="text-gray-400 text-sm">Equipment meets all NBC 2016 and CFO Mumbai norms.</p>
+                    </div>
+                  )}
+
+                  <Button
+                    onClick={() => { setResult(null); setFile(null); setPreview(null); setError(null); }}
+                    className="w-full h-12 font-bold uppercase tracking-wider text-xs rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 hover:bg-amber-500/10 hover:border-amber-400/50 transition-all duration-300"
+                  >
+                    NEW AUDIT
+                  </Button>
                 </div>
               )}
             </div>
