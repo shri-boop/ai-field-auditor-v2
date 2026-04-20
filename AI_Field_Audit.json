@@ -1,0 +1,364 @@
+{
+  "name": "AI_Field_Audit",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "audit-field-photo",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "audit-webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ],
+      "webhookId": "audit-field-photo-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\n\nconst image_base64 = body.image_base64 || null;\nconst site_id = body.site_id || 'unknown';\n\nif (!image_base64 || image_base64.trim().length === 0) {\n  throw new Error('Missing required field: image_base64 not found in request body.');\n}\n\nreturn [{\n  json: {\n    image_base64: image_base64.trim(),\n    site_id: site_id\n  }\n}];"
+      },
+      "id": "audit-node-parse-input",
+      "name": "PARSE_Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst image_base64 = $input.item.json.image_base64;\nconst site_id = $input.item.json.site_id;\n\nconst auditPrompt = \"You are a strict Fire Safety Compliance Auditor operating under NBC 2016 and CFO Mumbai norms. Inspect this image of fire safety equipment and evaluate compliance. Check for: 1) Pressure gauges \\u2014 needle must be in green zone; 2) Safety pin \\u2014 must be intact and sealed with tamper tag; 3) ISI mark \\u2014 must be visible on cylinder body; 4) Hose reel glass \\u2014 must be unbroken; 5) Expiry date \\u2014 must not be expired; 6) Physical damage \\u2014 no dents, rust, or corrosion; 7) Mounting \\u2014 must be properly mounted at correct height; 8) Signage \\u2014 inspection tag must be present and current. Return ONLY valid JSON with no markdown, no explanation, no code blocks. Exact schema: {\\\"equipment_type\\\": \\\"string\\\", \\\"status\\\": \\\"COMPLIANT or NON-COMPLIANT\\\", \\\"confidence\\\": \\\"HIGH or MEDIUM or LOW\\\", \\\"observations\\\": \\\"string describing what you see\\\", \\\"violations\\\": [\\\"list of violation strings, empty array if compliant\\\"]}\";\n\nconst payload = {\n  model: 'anthropic/claude-3.5-sonnet',\n  max_tokens: 1024,\n  messages: [\n    {\n      role: 'user',\n      content: [\n        {\n          type: 'image',\n          source: {\n            type: 'base64',\n            media_type: 'image/jpeg',\n            data: image_base64\n          }\n        },\n        {\n          type: 'text',\n          text: auditPrompt\n        }\n      ]\n    }\n  ]\n};\n\nreturn [{\n  json: {\n    payload: payload,\n    site_id: site_id\n  }\n}];"
+      },
+      "id": "audit-node-build-payload",
+      "name": "BUILD_Vision_Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "audit-node-vision-api",
+      "name": "Claude_Vision_API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        920,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content || '';\n\n// Strip markdown fences if Claude accidentally adds them\nlet cleaned = raw\n  .replace(/```json\\s*/gi, '')\n  .replace(/```\\s*/g, '')\n  .trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    equipment_type: 'Unknown',\n    status: 'ERROR',\n    confidence: 'LOW',\n    observations: 'Failed to parse AI response: ' + e.message,\n    violations: ['AI_PARSE_ERROR']\n  };\n}\n\nconst site_id = $('BUILD_Vision_Payload').first().json.site_id || 'unknown';\n\nreturn [{\n  json: {\n    ...parsed,\n    site_id: site_id,\n    audit_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "audit-node-parse-response",
+      "name": "PARSE_Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "field_audit_logs",
+          "mode": "list",
+          "cachedResultName": "field_audit_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "equipment_type": "={{ $json.equipment_type }}",
+            "status": "={{ $json.status }}",
+            "violations": "={{ JSON.stringify($json.violations) }}",
+            "site_id": "={{ $json.site_id }}",
+            "audit_timestamp": "={{ $json.audit_timestamp }}",
+            "confidence": "={{ $json.confidence }}",
+            "observations": "={{ $json.observations }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "equipment_type",
+              "displayName": "equipment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "violations",
+              "displayName": "violations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "site_id",
+              "displayName": "site_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "audit_timestamp",
+              "displayName": "audit_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "observations",
+              "displayName": "observations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "audit-node-log-audit",
+      "name": "LOG_Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1400,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "audit-if-noncompliant-cond",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "NON-COMPLIANT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "audit-node-if-noncompliant",
+      "name": "IF_NonCompliant",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const status = $input.item.json.status;\nconst site_id = $input.item.json.site_id;\nconst violations = $input.item.json.violations || [];\nconst equipment = $input.item.json.equipment_type || 'Unknown Equipment';\nconst confidence = $input.item.json.confidence || 'N/A';\nconst timestamp = $input.item.json.audit_timestamp || new Date().toISOString();\n\nconst violationList = violations.length > 0\n  ? violations.map((v, i) => `  ${i + 1}. ${v}`).join('\\n')\n  : '  None recorded';\n\nconst alert = [\n  '🚨 AUDIT FAILED — IMMEDIATE ACTION REQUIRED',\n  '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',\n  `Site ID     : ${site_id}`,\n  `Equipment   : ${equipment}`,\n  `Status      : ${status}`,\n  `Confidence  : ${confidence}`,\n  `Timestamp   : ${timestamp}`,\n  '',\n  'VIOLATIONS DETECTED:',\n  violationList,\n  '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',\n  'Action: Notify site supervisor and schedule immediate maintenance.'\n].join('\\n');\n\nreturn [{\n  json: {\n    alert: alert,\n    site_id: site_id,\n    status: status,\n    equipment_type: equipment,\n    violations: violations,\n    audit_timestamp: timestamp\n  }\n}];"
+      },
+      "id": "audit-node-notify",
+      "name": "NOTIFY_OpsManager",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "audit-node-respond",
+      "name": "Respond_to_Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1880,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "PARSE_Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_Input": {
+      "main": [
+        [
+          {
+            "node": "BUILD_Vision_Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BUILD_Vision_Payload": {
+      "main": [
+        [
+          {
+            "node": "Claude_Vision_API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude_Vision_API": {
+      "main": [
+        [
+          {
+            "node": "PARSE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_Response": {
+      "main": [
+        [
+          {
+            "node": "LOG_Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_Audit": {
+      "main": [
+        [
+          {
+            "node": "IF_NonCompliant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NonCompliant": {
+      "main": [
+        [
+          {
+            "node": "NOTIFY_OpsManager",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_to_Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NOTIFY_OpsManager": {
+      "main": [
+        [
+          {
+            "node": "Respond_to_Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "ai-field-audit-v1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ai-field-audit-firescan"
+  },
+  "id": "ai-field-audit-001"
+}
