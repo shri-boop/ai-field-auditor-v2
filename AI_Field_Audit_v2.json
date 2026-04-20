@@ -1,0 +1,583 @@
+{
+  "name": "AI_Field_Audit_V2_URL_To_Base64",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "audit-field-photov2",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "04d67002-a419-4ac0-9146-56522ac2e8bc",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "audit-field-photo-v1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\n\nconst image_url = body.image_url || null;\nconst site_id = body.site_id || 'unknown';\n\nif (!image_url || image_url.trim().length === 0) {\n  throw new Error('Missing required field: image_url not found in request body.');\n}\n\nreturn [{\n  json: {\n    image_url: image_url.trim(),\n    site_id: site_id\n  }\n}];"
+      },
+      "id": "d40b79c6-6490-4c25-8368-675aa145c060",
+      "name": "PARSE_Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.image_url }}",
+        "options": {}
+      },
+      "id": "e95c6881-45e5-43be-a2ad-9abdc4c2b55b",
+      "name": "DOWNLOAD_Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the binary data object\nconst binaryData = $input.first().binary;\n\n// Use the internal n8n helper to force-read the file from disk into memory\nconst buffer = await this.helpers.getBinaryDataBuffer(0, 'data');\n\nif (!buffer) {\n  throw new Error('Failed to extract image data from disk.');\n}\n\n// Convert the buffer to a base64 string\nconst base64String = buffer.toString('base64');\nconst mediaType = binaryData.mimeType || 'image/jpeg';\n\nreturn [{\n  json: {\n    image_base64: base64String,\n    media_type: mediaType,\n    site_id: $input.first().json.site_id\n  }\n}];"
+      },
+      "id": "53c53810-adcc-455d-aecb-6b848b01a07c",
+      "name": "EXTRACT_Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const image_base64 = $input.item.json.image_base64;\nconst media_type = $input.item.json.media_type;\nconst site_id = $input.item.json.site_id;\n\nconst auditPrompt = \"You are a strict Fire Safety Compliance Auditor operating under NBC 2016 and CFO Mumbai norms. Inspect this image of fire safety equipment and evaluate compliance. Check for: 1) Pressure gauges — needle must be in green zone; 2) Safety pin — must be intact and sealed with tamper tag; 3) ISI mark — must be visible on cylinder body; 4) Hose reel glass — must be unbroken; 5) Expiry date — must not be expired; 6) Physical damage — no dents, rust, or corrosion; 7) Mounting — must be properly mounted at correct height; 8) Signage — inspection tag must be present and current. Return ONLY valid JSON with no markdown, no explanation, no code blocks. Exact schema: {\\\"equipment_type\\\": \\\"string\\\", \\\"status\\\": \\\"COMPLIANT or NON-COMPLIANT\\\", \\\"confidence\\\": \\\"HIGH or MEDIUM or LOW\\\", \\\"observations\\\": \\\"string describing what you see\\\", \\\"violations\\\": [\\\"list of violation strings, empty array if compliant\\\"]}\";\n\nconst payload = {\n  model: 'anthropic/claude-3-7-sonnet',\n  max_tokens: 1024,\n  messages: [\n    {\n      role: 'user',\n      content: [\n        {\n          type: 'image_url',\n          image_url: {\n            url: `data:${media_type};base64,${image_base64}`\n          }\n        },\n        {\n          type: 'text',\n          text: auditPrompt\n        }\n      ]\n    }\n  ]\n};\n\nreturn [{\n  json: {\n    payload: payload,\n    site_id: site_id\n  }\n}];"
+      },
+      "id": "ac327eed-92ed-45d6-8970-dda7c53a5505",
+      "name": "BUILD_Vision_Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "50381b6f-178e-4034-941a-6e815a201167",
+      "name": "Claude_Vision_API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1200,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "hzvsqNOjofBKlPYj",
+          "name": "OpenRouter"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content || '';\n\nlet cleaned = raw\n  .replace(/```json\\s*/gi, '')\n  .replace(/```\\s*/g, '')\n  .trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    equipment_type: 'Unknown',\n    status: 'ERROR',\n    confidence: 'LOW',\n    observations: 'Failed to parse AI response: ' + e.message,\n    violations: ['AI_PARSE_ERROR']\n  };\n}\n\nconst site_id = $('BUILD_Vision_Payload').first().json.site_id || 'unknown';\n\nreturn [{\n  json: {\n    ...parsed,\n    site_id: site_id,\n    audit_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "347b2d16-f457-4d4a-bde7-54524904cc81",
+      "name": "PARSE_Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "field_audit_logs",
+          "mode": "list",
+          "cachedResultName": "field_audit_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "equipment_type": "={{ $json.equipment_type }}",
+            "status": "={{ $json.status }}",
+            "violations": "={{ JSON.stringify($json.violations) }}",
+            "site_id": "={{ $json.site_id }}",
+            "audit_timestamp": "={{ $json.audit_timestamp }}",
+            "confidence": "={{ $json.confidence }}",
+            "observations": "={{ $json.observations }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "equipment_type",
+              "displayName": "equipment_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "violations",
+              "displayName": "violations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "site_id",
+              "displayName": "site_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "audit_timestamp",
+              "displayName": "audit_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "observations",
+              "displayName": "observations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "a33cd368-c711-4a6b-8fb7-dabda741d8b6",
+      "name": "LOG_Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1680,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "MABCMSMOtYOMKGr9",
+          "name": "Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "audit-if-noncompliant-cond",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "NON-COMPLIANT",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1423c4e5-19ba-4a19-b2f5-d18a5201af72",
+      "name": "IF_NonCompliant",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const status = $input.item.json.status;\nconst site_id = $input.item.json.site_id;\n\nlet violations = $input.item.json.violations || [];\nif (typeof violations === 'string') {\n  try { violations = JSON.parse(violations); } \n  catch (e) { violations = [violations]; }\n}\nif (!Array.isArray(violations)) violations = [String(violations)];\n\nlet reinspect_reasons = $input.item.json.reinspect_reasons || [];\nif (typeof reinspect_reasons === 'string') {\n  try { reinspect_reasons = JSON.parse(reinspect_reasons); } \n  catch (e) { reinspect_reasons = [reinspect_reasons]; }\n}\nif (!Array.isArray(reinspect_reasons)) reinspect_reasons = [String(reinspect_reasons)];\n\nconst equipment = $input.item.json.equipment_type || 'Unknown Equipment';\nconst confidence = $input.item.json.confidence || 'N/A';\nconst timestamp = $input.item.json.audit_timestamp || new Date().toISOString();\n\n// Format timestamp for India\nconst indiaTime = new Date(timestamp).toLocaleString('en-IN', {\n  timeZone: 'Asia/Kolkata',\n  dateStyle: 'medium',\n  timeStyle: 'short'\n});\n\nlet title, emoji, items, actionText;\n\nif (status === 'NON-COMPLIANT') {\n  title = 'AUDIT FAILED — IMMEDIATE ACTION REQUIRED';\n  emoji = '🔴';\n  items = violations;\n  actionText = 'Notify site supervisor and schedule immediate maintenance.';\n} else if (status === 'REINSPECT') {\n  title = 'REINSPECT REQUIRED — PHOTO QUALITY ISSUE';\n  emoji = '📸';\n  items = reinspect_reasons;\n  actionText = 'Request field technician to retake photos with better clarity.';\n} else {\n  title = 'AUDIT STATUS: ' + status;\n  emoji = '⚪';\n  items = violations;\n  actionText = 'Review required.';\n}\n\nconst itemList = items.length > 0\n  ? items.map((v, i) => `${i + 1}. ${v}`).join('\\n')\n  : 'None recorded';\n\n// PLAIN TEXT VERSION (Telegram + Email)\nconst plainAlert = `${emoji} ${title}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSite ID     : ${site_id}\nEquipment   : ${equipment}\nStatus      : ${status}\nConfidence  : ${confidence}\nTimestamp   : ${indiaTime}\n\n ${status === 'NON-COMPLIANT' ? 'VIOLATIONS DETECTED:' : 'ITEMS THAT COULD NOT BE VERIFIED:'}\n ${itemList}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAction: ${actionText}`;\n\n// SLACK MARKDOWN VERSION\nconst slackAlert = `:fire: *${title}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Site ID:* \\`${site_id}\\`\n*Equipment:* ${equipment}\n*Status:* \\`${status}\\`\n*Confidence:* ${confidence}\n*Timestamp:* ${indiaTime}\n\n*${status === 'NON-COMPLIANT' ? 'VIOLATIONS DETECTED:' : 'ITEMS THAT COULD NOT BE VERIFIED:'}*\n ${items.map(v => `• ${v}`).join('\\n')}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Action:* ${actionText}`;\n\n// EMAIL HTML VERSION\nconst htmlAlert = `\n<div style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;\">\n  <div style=\"background: ${status === 'NON-COMPLIANT' ? '#dc2626' : '#f59e0b'}; color: white; padding: 20px; text-align: center;\">\n    <h2 style=\"margin: 0;\">${emoji} ${title}</h2>\n  </div>\n  <div style=\"padding: 20px; background: #f9fafb;\">\n    <table style=\"width: 100%; border-collapse: collapse;\">\n      <tr><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: bold;\">Site ID</td><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb;\">${site_id}</td></tr>\n      <tr><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: bold;\">Equipment</td><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb;\">${equipment}</td></tr>\n      <tr><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: bold;\">Status</td><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb;\"><strong style=\"color: ${status === 'NON-COMPLIANT' ? '#dc2626' : '#f59e0b'};\">${status}</strong></td></tr>\n      <tr><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb; font-weight: bold;\">Confidence</td><td style=\"padding: 8px; border-bottom: 1px solid #e5e7eb;\">${confidence}</td></tr>\n      <tr><td style=\"padding: 8px; font-weight: bold;\">Timestamp</td><td style=\"padding: 8px;\">${indiaTime}</td></tr>\n    </table>\n  </div>\n  <div style=\"padding: 20px;\">\n    <h3 style=\"color: #374151; margin-top: 0;\">${status === 'NON-COMPLIANT' ? '🚨 Violations Detected:' : '📸 Items That Could Not Be Verified:'}</h3>\n    <ul style=\"color: #4b5563;\">\n      ${items.map(v => `<li style=\"padding: 4px 0;\">${v}</li>`).join('')}\n    </ul>\n  </div>\n  <div style=\"background: #eff6ff; padding: 15px 20px; border-top: 1px solid #ddd;\">\n    <strong>⚠️ Required Action:</strong> ${actionText}\n  </div>\n  <div style=\"background: #f3f4f6; padding: 10px 20px; font-size: 12px; color: #6b7280; text-align: center;\">\n    FireScan Mumbai | Powered by Arvami Solutionz | ${indiaTime}\n  </div>\n</div>`;\n\nreturn [{\n  json: {\n    // Plain text for Telegram\n    telegram_message: plainAlert,\n    // Slack markdown\n    slack_message: slackAlert,\n    // HTML for email\n    email_html: htmlAlert,\n    email_subject: `${emoji} Fire Audit ${status}: ${site_id}`,\n    // Keep original fields\n    alert: plainAlert,\n    site_id: site_id,\n    status: status,\n    equipment_type: equipment,\n    violations: violations,\n    reinspect_reasons: reinspect_reasons,\n    audit_timestamp: timestamp\n  }\n}];"
+      },
+      "id": "01516fcb-87b6-4aa6-9e45-5dafe13a6f9d",
+      "name": "NOTIFY_OpsManager",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2128,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "1020714503",
+        "text": "={{ $json.telegram_message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2560,
+        96
+      ],
+      "id": "581f1fcb-d3fd-4510-8e07-33b6037b72e7",
+      "name": "SEND_Telegram",
+      "webhookId": "186bfb4e-f4a4-4f43-ab5c-e28630fd4bd2",
+      "credentials": {
+        "telegramApi": {
+          "id": "zVa8XnwNUnDsjQP3",
+          "name": "psylentbot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "arvami-stack-errors",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_message }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        2544,
+        -400
+      ],
+      "id": "34b8cc57-bbb6-41dc-9e23-adb841cba1d8",
+      "name": "SEND_Slack",
+      "webhookId": "493e8c9f-7274-4cd4-aca2-03c025e84328",
+      "credentials": {
+        "slackApi": {
+          "id": "ENL0Pqx8J4NT39JR",
+          "name": "Arvami Stack Notifier(Slack)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mailagent": "56e447ba94c10108",
+        "fromaddress": {
+          "address": "shrinand.shirwal@arvamisolutionz.com"
+        },
+        "toaddress": "advaitabhaskaran@gmail.com",
+        "subject": "={{ $json.email_subject }}",
+        "htmlbody": "={{ $json.email_html }}",
+        "replyto": "noreply@arvamisolutionz.com",
+        "cc": "shrinand.shirwal84@gmail.com",
+        "attachment": {}
+      },
+      "type": "n8n-nodes-zohozeptomail.zohoZeptomail",
+      "typeVersion": 1,
+      "position": [
+        2544,
+        -176
+      ],
+      "id": "4b8a6abc-f3e4-4be9-a7bd-252485a0575a",
+      "name": "SEND_Mail",
+      "credentials": {
+        "zohoZeptomailOAuth2Api": {
+          "id": "lWnl3ccgqNdt0Rw2",
+          "name": "Zoho ZeptoMail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "8f513836-5da5-434b-b9d3-6d82778a6993",
+      "name": "Respond_to_Webhook1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        -112
+      ]
+    }
+  ],
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "headers": {
+            "host": "n8n.arvamisolutionz.com",
+            "user-agent": "PostmanRuntime/7.53.0",
+            "content-length": "105",
+            "accept": "*/*",
+            "accept-encoding": "gzip, br",
+            "cdn-loop": "cloudflare; loops=1",
+            "cf-connecting-ip": "110.226.177.158",
+            "cf-ipcountry": "IN",
+            "cf-ray": "9ed6540e3c7fcb4b-SIN",
+            "cf-visitor": "{\"scheme\":\"https\"}",
+            "content-type": "application/json",
+            "postman-token": "811c3c52-5fe6-4ce1-82cd-93aae3a1007b",
+            "via": "2.0 Caddy",
+            "x-forwarded-for": "104.23.175.240",
+            "x-forwarded-host": "n8n.arvamisolutionz.com",
+            "x-forwarded-proto": "https"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "image_url": "https://i.ibb.co/jkYdf2Cb/fire-extinguisher-bad.png",
+            "site_id": "SITE-TEST-001"
+          },
+          "webhookUrl": "https://n8n.arvamisolutionz.com/webhook/audit-field-photov2",
+          "executionMode": "production"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "PARSE_Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_Input": {
+      "main": [
+        [
+          {
+            "node": "DOWNLOAD_Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DOWNLOAD_Image": {
+      "main": [
+        [
+          {
+            "node": "EXTRACT_Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "EXTRACT_Base64": {
+      "main": [
+        [
+          {
+            "node": "BUILD_Vision_Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BUILD_Vision_Payload": {
+      "main": [
+        [
+          {
+            "node": "Claude_Vision_API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude_Vision_API": {
+      "main": [
+        [
+          {
+            "node": "PARSE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_Response": {
+      "main": [
+        [
+          {
+            "node": "LOG_Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_Audit": {
+      "main": [
+        [
+          {
+            "node": "IF_NonCompliant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_NonCompliant": {
+      "main": [
+        [
+          {
+            "node": "NOTIFY_OpsManager",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond_to_Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NOTIFY_OpsManager": {
+      "main": [
+        [
+          {
+            "node": "SEND_Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Mail",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond_to_Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_Telegram": {
+      "main": [
+        [
+          {
+            "node": "Respond_to_Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_Slack": {
+      "main": [
+        [
+          {
+            "node": "Respond_to_Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_Mail": {
+      "main": [
+        [
+          {
+            "node": "Respond_to_Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "e3f70411-5237-4fe7-8466-8b25421021c0",
+  "meta": {
+    "instanceId": "201686c20d6f93df86cd3f788b0db47868a2fcc48ba963d167cce5d483d0b2c7"
+  },
+  "id": "ixVYXs7ziCEthdOC",
+  "tags": []
+}
