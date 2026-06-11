@@ -106,7 +106,11 @@ export default function FirescanDashboard() {
     : '—';
 
   const observations = audit?.observations || 'No observations returned.';
-  const violations = audit?.violations || [];
+  let violations = audit?.violations || [];
+if (typeof violations === 'string') {
+  try { violations = JSON.parse(violations); } 
+  catch (e) { violations = []; }
+}
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950">
