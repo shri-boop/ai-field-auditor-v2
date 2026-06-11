@@ -120,7 +120,7 @@ if (typeof violations === 'string') {
             {/* LEFT COLUMN */}
             <div className="space-y-8">
               <div>
-                                <h1 className="text-6xl font-black gold-text leading-none" style={{ filter: 'drop-shadow(0 0 10px rgba(255, 170, 0, 0.25))' }}>FIRESCAN</h1>
+                                <h1 className="text-6xl font-black gold-text leading-none" style={{ filter: 'drop-shadow(0 0 10px rgba(255, 170, 0, 0.25))' }}>FIREHAWK</h1>
                 <p className="text-amber-600/60 text-sm uppercase tracking-widest mt-3 font-medium">
                   AI Compliance Command Center
                 </p>
