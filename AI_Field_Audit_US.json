@@ -1,0 +1,694 @@
+{
+  "name": "AI_Field_Audit_US_NFPA_IFC",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "audit-field-photo-us",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "us-webhook-0001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2600,
+        400
+      ],
+      "webhookId": "audit-field-photo-us"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 1 — VALIDATE_Input\n * Mode: Run Once for All Items\n *\n * Responsibilities:\n *   - Hard schema validation of the inbound webhook body (fail fast, fail loud).\n *   - SSRF hardening: the image URL is attacker-controllable and is later\n *     dereferenced by a third party (OpenRouter), so restrict scheme + host.\n *   - Mint a stable audit_id and an idempotency_key so repeated submissions of\n *     the same photo for the same site collapse to one logical audit.\n *\n * Contract (POST body):\n *   image_url        (required) https URL on an allow-listed object store\n *   site_id          (optional) free-form site code\n *   jurisdiction     (optional) \"CA\" | \"FL\" | \"NY-NYC\" | \"TX\" ... default US-DEFAULT\n *   occupancy_type   (optional) NFPA 101 / IFC occupancy classification hint\n *   equipment_hint   (optional) skip classification and force a checklist\n *   inspector_id     (optional) who took the photo\n *   osha_workplace   (optional) bool, default true -> apply 29 CFR 1910 overlay\n *   asset_tag        (optional) client asset identifier\n */\n\nconst body = $input.first().json.body || {};\n\n// ---------------------------------------------------------------- image_url\nconst image_url = String(body.image_url || '').trim();\nif (!image_url) {\n  throw new Error('VALIDATION: \"image_url\" is required and was empty.');\n}\n\nlet parsed;\ntry {\n  parsed = new URL(image_url);\n} catch (e) {\n  throw new Error('VALIDATION: \"image_url\" is not a valid absolute URL.');\n}\n\nif (parsed.protocol !== 'https:') {\n  throw new Error('VALIDATION: \"image_url\" must use https (got ' + parsed.protocol + ').');\n}\n\n// Allow-list of object-store hosts we are willing to hand to the vision provider.\n// Entries beginning with \".\" are treated as suffix matches on the hostname.\nconst ALLOWED_IMAGE_HOSTS = [\n  '.public.blob.vercel-storage.com',\n  '.s3.amazonaws.com',\n  '.s3.us-east-1.amazonaws.com',\n  '.r2.cloudflarestorage.com',\n  '.blob.core.windows.net',\n  'storage.googleapis.com'\n];\n\nconst host = parsed.hostname.toLowerCase();\nconst hostAllowed = ALLOWED_IMAGE_HOSTS.some(function (entry) {\n  return entry.charAt(0) === '.' ? host.endsWith(entry) : host === entry;\n});\nif (!hostAllowed) {\n  throw new Error('VALIDATION: image host is not allow-listed: ' + host);\n}\n\n// Defence in depth: refuse loopback / link-local / RFC1918 literals outright.\nconst PRIVATE_LITERAL = /^(localhost|0\\.0\\.0\\.0|127\\.|10\\.|169\\.254\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|\\[?::1\\]?)/;\nif (PRIVATE_LITERAL.test(host)) {\n  throw new Error('VALIDATION: private, loopback or link-local image hosts are not permitted.');\n}\n\n// ------------------------------------------------------------ site metadata\nfunction clean(value, fallback, maxLength) {\n  const out = String(value === undefined || value === null ? '' : value).trim();\n  return (out || fallback).slice(0, maxLength || 64);\n}\n\nconst site_id = clean(body.site_id, 'UNKNOWN-SITE', 64).toUpperCase();\nconst jurisdiction = clean(body.jurisdiction || body.state, 'US-DEFAULT', 16).toUpperCase();\nconst occupancy_type = clean(body.occupancy_type, 'BUSINESS', 48).toUpperCase();\nconst equipment_hint = clean(body.equipment_hint, 'AUTO', 48).toUpperCase().replace(/[\\s-]+/g, '_');\nconst inspector_id = clean(body.inspector_id, 'UNASSIGNED', 64);\nconst asset_tag = clean(body.asset_tag, '', 64);\n\n// OSHA general-industry duties attach to workplaces. Default to applying them;\n// callers must explicitly opt out (e.g. pure residential common areas).\nconst osha_workplace = body.osha_workplace !== false;\n\n// ------------------------------------------------- identity + idempotency\n// FNV-1a: no crypto module needed (n8n sandboxes builtins by default).\nfunction fnv1a(str) {\n  let h = 0x811c9dc5;\n  for (let i = 0; i < str.length; i++) {\n    h ^= str.charCodeAt(i);\n    h = Math.imul(h, 0x01000193) >>> 0;\n  }\n  return h.toString(16).padStart(8, '0');\n}\n\nconst received_at = new Date().toISOString();\nconst idempotency_key = fnv1a(site_id + '|' + image_url + '|' + equipment_hint);\nconst audit_id =\n  'FA-US-' +\n  received_at.slice(0, 10).replace(/-/g, '') +\n  '-' +\n  idempotency_key.toUpperCase() +\n  '-' +\n  Math.random().toString(36).slice(2, 7).toUpperCase();\n\nreturn [{\n  json: {\n    audit_id: audit_id,\n    idempotency_key: idempotency_key,\n    received_at: received_at,\n    image_url: image_url,\n    image_host: host,\n    site_id: site_id,\n    jurisdiction: jurisdiction,\n    occupancy_type: occupancy_type,\n    equipment_hint: equipment_hint,\n    inspector_id: inspector_id,\n    asset_tag: asset_tag,\n    osha_workplace: osha_workplace\n  }\n}];\n"
+      },
+      "id": "us-validate-0002",
+      "name": "VALIDATE_Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2380,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 2 — RESOLVE_CodeBasis\n * Mode: Run Once for All Items\n *\n * WHY THIS NODE EXISTS\n * --------------------\n * The India workflow could hardcode \"NBC 2016 + CFO Mumbai\" into the prompt\n * because India has a single national code and one local AHJ. The United States\n * does not work that way:\n *\n *   - ~41 states + DC, NYC, Guam and Puerto Rico use the International Fire Code\n *     (ICC), currently the 2024 edition.\n *   - Florida is NOT on the IFC. It uses the Florida Fire Prevention Code,\n *     8th Edition (2023), built from Florida-specific editions of NFPA 1 (2021)\n *     and NFPA 101 (2021), per Fla. Admin. Code R. 69A-3.012.\n *   - California republishes the IFC as the California Fire Code (Title 24\n *     Part 9) on a triennial cycle, and layers Title 19 CCR on top.\n *   - New York City runs its own FDNY-administered Fire Code.\n *   - Independently of all of the above, workplaces carry federal OSHA duties\n *     under 29 CFR 1910 Subpart L / Subpart E, which OSHA can cite directly.\n *\n * Therefore the applicable code is DATA, resolved per request, and the prompt is\n * rendered from that data. Adding a jurisdiction is a registry edit, not a\n * prompt rewrite.\n *\n * HONESTY REQUIREMENT\n * -------------------\n * Code adoption changes, and local amendments routinely override state defaults.\n * Every registry entry therefore carries `verified_on` and\n * `requires_ahj_confirmation`. Unknown jurisdictions fall back to the model-code\n * baseline and are explicitly flagged rather than silently guessed at.\n */\n\nconst input = $input.first().json;\n\n// ---------------------------------------------------------------------------\n// Nationally referenced inspection/testing/maintenance standards.\n// `edition_verified` records whether the edition was confirmed against a\n// primary source during authoring. Unverified editions still drive the prompt,\n// but the report tells the human reviewer to confirm them.\n// ---------------------------------------------------------------------------\nconst REFERENCED_STANDARDS = {\n  PORTABLE_FIRE_EXTINGUISHER: { std: 'NFPA 10',   edition: '2022', title: 'Standard for Portable Fire Extinguishers', edition_verified: true },\n  SPRINKLER_SYSTEM:           { std: 'NFPA 25',   edition: '2023', title: 'ITM of Water-Based Fire Protection Systems', edition_verified: false },\n  STANDPIPE_HOSE:             { std: 'NFPA 25',   edition: '2023', title: 'ITM of Water-Based Fire Protection Systems', edition_verified: false },\n  FIRE_ALARM:                 { std: 'NFPA 72',   edition: '2025', title: 'National Fire Alarm and Signaling Code', edition_verified: false },\n  KITCHEN_SUPPRESSION:        { std: 'NFPA 96',   edition: '2024', title: 'Ventilation Control and Fire Protection of Commercial Cooking Operations', edition_verified: false },\n  FIRE_DOOR:                  { std: 'NFPA 80',   edition: '2025', title: 'Fire Doors and Other Opening Protectives', edition_verified: false },\n  MEANS_OF_EGRESS:            { std: 'NFPA 101',  edition: '2024', title: 'Life Safety Code', edition_verified: false },\n  EMERGENCY_POWER:            { std: 'NFPA 110',  edition: '2025', title: 'Emergency and Standby Power Systems', edition_verified: false },\n  ELECTRICAL_HOUSEKEEPING:    { std: 'NFPA 70',   edition: '2023', title: 'National Electrical Code', edition_verified: false }\n};\n\n// ---------------------------------------------------------------------------\n// Jurisdiction registry. Keys are USPS state codes, optionally suffixed with a\n// home-rule city (e.g. \"NY-NYC\", \"IL-CHICAGO\").\n// ---------------------------------------------------------------------------\nconst CODE_BASIS_REGISTRY = {\n  'US-DEFAULT': {\n    label: 'Model-code baseline (no state-specific override matched)',\n    fire_code: 'International Fire Code (IFC)',\n    fire_code_edition: '2024',\n    fire_code_publisher: 'International Code Council',\n    life_safety_code: 'NFPA 101, Life Safety Code (2024)',\n    ahj_label: 'Local Authority Having Jurisdiction (AHJ)',\n    state_overlays: [],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: 'The IFC is in use or adopted in roughly 41 states plus DC, NYC, Guam and Puerto Rico. Confirm the edition and local amendments with the AHJ before relying on any citation.'\n  },\n  'CA': {\n    label: 'California',\n    fire_code: 'California Fire Code (CFC), Title 24 Part 9 — California republication of the IFC',\n    fire_code_edition: '2025 (triennial cycle; confirm the edition in force with the AHJ)',\n    fire_code_publisher: 'California Building Standards Commission / Office of the State Fire Marshal',\n    life_safety_code: 'Not separately adopted; CFC governs',\n    ahj_label: 'Local fire authority under the Office of the State Fire Marshal (OSFM)',\n    state_overlays: [\n      'Title 19 CCR (State Fire Marshal regulations), including extinguisher servicing rules',\n      'OSFM licenses the companies and technicians that service portable fire extinguishers, so servicing tags carry a California licence number',\n      'Cal/OSHA operates an OSHA-approved State Plan; Title 8 CCR applies instead of federal 29 CFR 1910'\n    ],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: 'California is on a triennial code cycle with intervening supplements. Verify whether the 2022 or 2025 CFC is in force for this project.'\n  },\n  'FL': {\n    label: 'Florida',\n    fire_code: 'Florida Fire Prevention Code (FFPC), 8th Edition (2023) — NFPA-based, NOT the IFC',\n    fire_code_edition: '8th Edition (2023), comprising Florida editions of NFPA 1 (2021) and NFPA 101 (2021)',\n    fire_code_publisher: 'Florida State Fire Marshal',\n    life_safety_code: 'NFPA 101, Life Safety Code, Florida 2021 Edition',\n    ahj_label: 'Local fire official (county, municipality or special fire district)',\n    state_overlays: [\n      'Fla. Admin. Code R. 69A-3.012 adopts the FFPC and its referenced NFPA standards',\n      'Statutory firesafety inspections may only be performed by a firesafety inspector certified under s. 633.216, Florida Statutes',\n      'The Florida Building Code is substituted wherever the code references a building code or NFPA 220'\n    ],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: 'Cite NFPA 1 / NFPA 101 rather than IFC chapters for Florida. The FFPC is re-adopted on three-year intervals under s. 633.202, F.S.'\n  },\n  'NY-NYC': {\n    label: 'New York City',\n    fire_code: 'New York City Fire Code (Title 29, NYC Administrative Code)',\n    fire_code_edition: '2022 (confirm current amendments with FDNY)',\n    fire_code_publisher: 'City of New York / FDNY',\n    life_safety_code: 'NYC Building Code (Title 28) governs; NFPA 101 not independently adopted',\n    ahj_label: 'FDNY Bureau of Fire Prevention',\n    state_overlays: [\n      'FDNY Certificate of Fitness (C of F) required for many inspection, testing and impairment duties',\n      'NYC operates its own code rather than the state Uniform Code',\n      'Portable extinguisher servicing requires an FDNY-permitted company'\n    ],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: 'NYC is a home-rule jurisdiction. Do not apply IFC chapter numbers here.'\n  },\n  'NY': {\n    label: 'New York State (outside NYC)',\n    fire_code: 'NYS Uniform Fire Prevention and Building Code (2020 Uniform Code, IFC-based)',\n    fire_code_edition: '2020 Uniform Code Supplement (IFC 2018 base); confirm current edition',\n    fire_code_publisher: 'NYS Department of State, Division of Building Standards and Codes',\n    life_safety_code: 'Uniform Code governs',\n    ahj_label: 'Local code enforcement official / county fire coordinator',\n    state_overlays: ['NYC is excluded from the Uniform Code and is handled under jurisdiction key NY-NYC'],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: ''\n  },\n  'TX': {\n    label: 'Texas',\n    fire_code: 'International Fire Code (IFC) as adopted by the state and by local ordinance',\n    fire_code_edition: '2021 statewide baseline; many municipalities adopt later editions with amendments',\n    fire_code_publisher: 'International Code Council / adopting municipality',\n    life_safety_code: 'NFPA 101 where adopted by the AHJ or required by licensing',\n    ahj_label: 'Local fire marshal; State Fire Marshal\\u2019s Office for state-regulated occupancies',\n    state_overlays: [\n      'Texas is strongly home-rule: municipal amendments frequently govern',\n      'Extinguisher and alarm contractors are licensed by the Texas Department of Insurance, State Fire Marshal\\u2019s Office'\n    ],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: 'Always confirm the adopting ordinance for the specific city.'\n  },\n  'MA': {\n    label: 'Massachusetts',\n    fire_code: 'Massachusetts Comprehensive Fire Safety Code, 527 CMR 1.00 (NFPA 1 based)',\n    fire_code_edition: '527 CMR 1.00 incorporating NFPA 1 with Massachusetts amendments',\n    fire_code_publisher: 'Massachusetts Department of Fire Services',\n    life_safety_code: 'NFPA 101 as referenced by 527 CMR 1.00',\n    ahj_label: 'Local fire department head / State Fire Marshal',\n    state_overlays: ['Massachusetts is NFPA-based rather than IFC-based; cite NFPA 1 chapters'],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: ''\n  },\n  'IL-CHICAGO': {\n    label: 'Chicago',\n    fire_code: 'Chicago Fire Prevention Code (Municipal Code of Chicago, Title 15)',\n    fire_code_edition: 'Chicago Construction Codes as amended; confirm with CFD',\n    fire_code_publisher: 'City of Chicago',\n    life_safety_code: 'Chicago Building Code governs',\n    ahj_label: 'Chicago Fire Department, Bureau of Fire Prevention',\n    state_overlays: ['Chicago maintains its own code and is not covered by the Illinois state adoption'],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: ''\n  },\n  'WA': {\n    label: 'Washington',\n    fire_code: 'Washington State Fire Code, WAC 51-54A (IFC based)',\n    fire_code_edition: 'IFC 2021 base with Washington amendments; confirm current cycle',\n    fire_code_publisher: 'Washington State Building Code Council',\n    life_safety_code: 'State Fire Code governs',\n    ahj_label: 'Local fire marshal / Washington State Patrol Office of the State Fire Marshal',\n    state_overlays: ['Washington operates an OSHA-approved State Plan (WISHA / WAC 296)'],\n    verified_on: '2026-08-31',\n    requires_ahj_confirmation: true,\n    notes: ''\n  }\n};\n\n// Timezones for correct local timestamping even when the code basis falls back.\n// (States spanning multiple zones are mapped to their predominant zone; a\n// per-site override via body.timezone would be the next refinement.)\nconst TIMEZONE_BY_STATE = {\n  AL: 'America/Chicago', AK: 'America/Anchorage', AZ: 'America/Phoenix', AR: 'America/Chicago',\n  CA: 'America/Los_Angeles', CO: 'America/Denver', CT: 'America/New_York', DE: 'America/New_York',\n  DC: 'America/New_York', FL: 'America/New_York', GA: 'America/New_York', HI: 'Pacific/Honolulu',\n  ID: 'America/Boise', IL: 'America/Chicago', IN: 'America/Indiana/Indianapolis', IA: 'America/Chicago',\n  KS: 'America/Chicago', KY: 'America/New_York', LA: 'America/Chicago', ME: 'America/New_York',\n  MD: 'America/New_York', MA: 'America/New_York', MI: 'America/Detroit', MN: 'America/Chicago',\n  MS: 'America/Chicago', MO: 'America/Chicago', MT: 'America/Denver', NE: 'America/Chicago',\n  NV: 'America/Los_Angeles', NH: 'America/New_York', NJ: 'America/New_York', NM: 'America/Denver',\n  NY: 'America/New_York', NC: 'America/New_York', ND: 'America/Chicago', OH: 'America/New_York',\n  OK: 'America/Chicago', OR: 'America/Los_Angeles', PA: 'America/New_York', RI: 'America/New_York',\n  SC: 'America/New_York', SD: 'America/Chicago', TN: 'America/Chicago', TX: 'America/Chicago',\n  UT: 'America/Denver', VT: 'America/New_York', VA: 'America/New_York', WA: 'America/Los_Angeles',\n  WV: 'America/New_York', WI: 'America/Chicago', WY: 'America/Denver', PR: 'America/Puerto_Rico'\n};\n\n// States running OSHA-approved State Plans covering private-sector employers.\n// Federal 29 CFR 1910 citations should be reframed to the state plan there.\nconst STATE_PLAN_STATES = {\n  AK: 'Alaska Occupational Safety and Health (AKOSH)',\n  AZ: 'Arizona Division of Occupational Safety and Health (ADOSH)',\n  CA: 'Cal/OSHA (Title 8 CCR)',\n  HI: 'Hawaii Occupational Safety and Health (HIOSH)',\n  IN: 'Indiana Occupational Safety and Health Administration (IOSHA)',\n  IA: 'Iowa OSHA',\n  KY: 'Kentucky Occupational Safety and Health Program',\n  MD: 'Maryland Occupational Safety and Health (MOSH)',\n  MI: 'Michigan Occupational Safety and Health Administration (MIOSHA)',\n  MN: 'Minnesota OSHA',\n  NV: 'Nevada OSHA',\n  NM: 'New Mexico Occupational Health and Safety Bureau',\n  NC: 'North Carolina Department of Labor OSH Division',\n  OR: 'Oregon OSHA',\n  SC: 'South Carolina OSHA',\n  TN: 'Tennessee OSHA',\n  UT: 'Utah Occupational Safety and Health (UOSH)',\n  VT: 'VOSHA',\n  VA: 'Virginia Occupational Safety and Health (VOSH)',\n  WA: 'Washington WISHA (WAC 296)',\n  WY: 'Wyoming OSHA'\n};\n\n// ---------------------------------------------------------------- resolution\nconst requested = input.jurisdiction || 'US-DEFAULT';\nconst stateCode = requested.split('-')[0];\n\nlet resolvedKey = 'US-DEFAULT';\nif (CODE_BASIS_REGISTRY[requested]) {\n  resolvedKey = requested;                 // exact match, incl. home-rule cities\n} else if (CODE_BASIS_REGISTRY[stateCode]) {\n  resolvedKey = stateCode;                 // fall back to the state entry\n}\n\nconst basis = CODE_BASIS_REGISTRY[resolvedKey];\nconst matchedExactly = resolvedKey === requested;\n\nconst timezone = TIMEZONE_BY_STATE[stateCode] || 'America/New_York';\nconst statePlan = STATE_PLAN_STATES[stateCode] || null;\n\n// OSHA overlay text: federal 29 CFR 1910 unless a State Plan displaces it.\nlet osha_overlay = null;\nif (input.osha_workplace) {\n  osha_overlay = statePlan\n    ? statePlan + ' (OSHA-approved State Plan; standards are at least as effective as 29 CFR 1910)'\n    : 'Federal OSHA 29 CFR 1910 — Subpart L (fire protection, incl. 1910.157 portable fire extinguishers) and Subpart E (exit routes, 1910.36 / 1910.37)';\n}\n\nconst code_basis = {\n  jurisdiction_requested: requested,\n  jurisdiction_resolved: resolvedKey,\n  jurisdiction_label: basis.label,\n  exact_match: matchedExactly,\n  fire_code: basis.fire_code,\n  fire_code_edition: basis.fire_code_edition,\n  fire_code_publisher: basis.fire_code_publisher,\n  life_safety_code: basis.life_safety_code,\n  ahj_label: basis.ahj_label,\n  state_overlays: basis.state_overlays,\n  osha_overlay: osha_overlay,\n  osha_state_plan: statePlan,\n  timezone: timezone,\n  referenced_standards: REFERENCED_STANDARDS,\n  verified_on: basis.verified_on,\n  requires_ahj_confirmation: basis.requires_ahj_confirmation,\n  notes: basis.notes,\n  // Set false whenever we had to fall back, so the report can say so plainly.\n  code_basis_confident: matchedExactly\n};\n\nconst unverified_editions = Object.keys(REFERENCED_STANDARDS).filter(function (k) {\n  return !REFERENCED_STANDARDS[k].edition_verified;\n}).map(function (k) {\n  return REFERENCED_STANDARDS[k].std + ' (' + REFERENCED_STANDARDS[k].edition + ')';\n});\n\n// De-duplicate standard names (NFPA 25 appears twice in the map).\nconst unique_unverified = unverified_editions.filter(function (v, i, a) {\n  return a.indexOf(v) === i;\n});\n\nreturn [{\n  json: Object.assign({}, input, {\n    code_basis: code_basis,\n    unverified_standard_editions: unique_unverified\n  })\n}];\n"
+      },
+      "id": "us-codebasis-0003",
+      "name": "RESOLVE_CodeBasis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2160,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 3 — BUILD_Vision_Payload\n * Mode: Run Once for All Items\n *\n * Renders the audit prompt from (a) the resolved code basis and (b) a\n * per-equipment-class checklist registry. The prompt is generated, never\n * hardcoded, so adding a checklist item or a jurisdiction never requires\n * touching prose.\n *\n * DESIGN NOTES\n *  - Severity is assigned by US inspection practice, not invented by the model:\n *    CRITICAL = immediate life-safety hazard or system impairment\n *    MAJOR    = real reduction in protection, not immediately life-threatening\n *    MINOR    = documentation / administrative\n *  - The model is explicitly required to declare what it CANNOT determine from a\n *    photograph (weight, internal condition, functional tests). A still image can\n *    never certify compliance, and the system must say so rather than imply it.\n *  - temperature 0 for run-to-run stability on the same photo.\n */\n\nconst input = $input.first().json;\nconst cb = input.code_basis;\nconst std = cb.referenced_standards;\n\nfunction ref(key) {\n  const s = std[key];\n  return s ? s.std + ' (' + s.edition + ')' : '';\n}\n\n// ---------------------------------------------------------------------------\n// CHECKLIST REGISTRY\n// ---------------------------------------------------------------------------\nconst CHECKLISTS = {\n  PORTABLE_FIRE_EXTINGUISHER: {\n    label: 'Portable fire extinguisher (and its cabinet / bracket / signage)',\n    primary: ref('PORTABLE_FIRE_EXTINGUISHER'),\n    checks: [\n      { id: 'UNIT_MISSING_OR_DISCHARGED', sev: 'CRITICAL', text: 'Unit absent from its designated bracket or cabinet, visibly discharged, or the gauge needle sits in the recharge/overcharge zone rather than the operable (green) range.', ref: 'NFPA 10 7.2.2; 29 CFR 1910.157(c)(4)' },\n      { id: 'ACCESS_FULLY_BLOCKED', sev: 'CRITICAL', text: 'Access to the unit is fully blocked or the unit is completely obscured from view by stock, equipment or furniture.', ref: 'NFPA 10 6.1.3.3; 29 CFR 1910.157(c)(1)' },\n      { id: 'GAUGE_OUT_OF_RANGE', sev: 'MAJOR', text: 'Pressure gauge needle is outside the operable range, gauge face is fogged, cracked, corroded or unreadable.', ref: 'NFPA 10 7.2.2' },\n      { id: 'SEAL_OR_PIN_COMPROMISED', sev: 'MAJOR', text: 'Pull pin missing or not seated, or the tamper seal / tamper indicator is broken, missing or previously actuated.', ref: 'NFPA 10 7.2.2' },\n      { id: 'ANNUAL_TAG_MISSING_OR_LAPSED', sev: 'MAJOR', text: 'Annual maintenance tag absent, illegible, unsigned, or the most recent punch/date is more than 12 months old.', ref: 'NFPA 10 7.3.1; 29 CFR 1910.157(e)(3)' },\n      { id: 'INTERNAL_OR_HYDRO_OVERDUE', sev: 'MAJOR', text: 'Six-year internal maintenance or hydrostatic test appears overdue based on dates stamped on the shell, collar or verification-of-service collar. Typical hydrostatic intervals: 12 years for stored-pressure dry chemical, 5 years for CO2, water, wet chemical and AFFF.', ref: 'NFPA 10 7.3.3 and 8.3.1; 29 CFR 1910.157(f)' },\n      { id: 'MOUNTING_HEIGHT_WRONG', sev: 'MAJOR', text: 'Mounting height non-compliant: for gross weight up to and including 40 lb the top must be no more than 5 ft above the floor; above 40 lb (other than wheeled units) no more than 3.5 ft; and in all cases the clearance between the bottom of the unit and the floor must be at least 4 in.', ref: 'NFPA 10 6.1.3.8 and 6.1.3.9' },\n      { id: 'NOT_CONSPICUOUS_OR_UNSIGNED', sev: 'MAJOR', text: 'Unit is not in a conspicuous location, or the location marking/sign is missing where the unit is not plainly visible (e.g. recessed cabinet, behind an obstruction, high-rack area).', ref: 'NFPA 10 6.1.3.3' },\n      { id: 'PHYSICAL_DAMAGE_OR_CORROSION', sev: 'MAJOR', text: 'Corrosion, pitting, dents, damaged or missing hose/horn/nozzle, cracked or clogged nozzle, damaged carrying handle or lever, or an illegible operating nameplate.', ref: 'NFPA 10 7.2.2' },\n      { id: 'WRONG_CLASS_FOR_HAZARD', sev: 'MAJOR', text: 'Extinguisher class does not match the hazard visible in the scene — for example no Class K unit serving a commercial cooking appliance with vegetable or animal fat, or a water-based unit sited at an energised electrical hazard.', ref: 'NFPA 10 5.5 and 6.6' },\n      { id: 'LISTING_LABEL_MISSING', sev: 'MINOR', text: 'UL Listing or FM Approval mark absent, painted over or illegible. (This is the US analogue of the Indian ISI mark — do NOT look for an ISI mark.)', ref: 'NFPA 10 5.2.1' },\n      { id: 'CABINET_DEFECT', sev: 'MINOR', text: 'Cabinet glass broken or missing, latch or door damaged, cabinet not marked to identify the extinguisher inside, or break-glass tool missing.', ref: 'NFPA 10 6.1.3' }\n    ]\n  },\n\n  SPRINKLER_SYSTEM: {\n    label: 'Automatic sprinkler system, riser, control valve or sprinkler head',\n    primary: ref('SPRINKLER_SYSTEM'),\n    checks: [\n      { id: 'CONTROL_VALVE_CLOSED', sev: 'CRITICAL', text: 'A sprinkler control valve appears closed or partially closed. A closed valve is a system impairment, not merely a deficiency.', ref: 'NFPA 25 13.3.2 and Chapter 15' },\n      { id: 'HEAD_MISSING_OR_PAINTED', sev: 'CRITICAL', text: 'Sprinkler head missing, painted over, coated, plugged, or fitted with a foreign object; escutcheon absent in a way that exposes the ceiling void.', ref: 'NFPA 25 5.2.1' },\n      { id: 'VALVE_NOT_SUPERVISED', sev: 'MAJOR', text: 'Control valve not sealed, locked or electrically supervised in the open position, or missing its identification signage.', ref: 'NFPA 25 13.3.2' },\n      { id: 'GAUGE_ABNORMAL_OR_EXPIRED', sev: 'MAJOR', text: 'System gauge reads outside the normal range, or the gauge appears more than 5 years old without replacement or calibration.', ref: 'NFPA 25 13.2.7' },\n      { id: 'CLEARANCE_UNDER_HEADS', sev: 'MAJOR', text: 'Storage or obstruction encroaches on the required clear space below sprinkler deflectors (commonly 18 in minimum), or shelving/ductwork blocks the discharge pattern.', ref: 'NFPA 13; IFC 315 storage provisions' },\n      { id: 'HEAD_CORROSION_OR_LOADING', sev: 'MAJOR', text: 'Heads show corrosion, mechanical damage, or loading with dust, grease, lint or overspray.', ref: 'NFPA 25 5.2.1' },\n      { id: 'FDC_DEFECT', sev: 'MAJOR', text: 'Fire department connection missing caps or plugs, damaged or fouled threads, visible debris in the intake, obstructed approach, or missing identification signage.', ref: 'NFPA 25 13.7' },\n      { id: 'ITM_RECORD_MISSING', sev: 'MINOR', text: 'Inspection, testing and maintenance tag or record absent, illegible or lapsed at the riser.', ref: 'NFPA 25 4.3' },\n      { id: 'SPARE_HEAD_CABINET', sev: 'MINOR', text: 'Spare sprinkler cabinet missing, under-stocked for the head types installed, or missing the correct sprinkler wrench.', ref: 'NFPA 25 5.4.1' }\n    ]\n  },\n\n  FIRE_ALARM: {\n    label: 'Fire alarm control panel, initiating device or notification appliance',\n    primary: ref('FIRE_ALARM'),\n    checks: [\n      { id: 'PANEL_NOT_NORMAL', sev: 'CRITICAL', text: 'Fire alarm control panel shows a trouble, supervisory, alarm or silenced condition, has devices disabled or bypassed, or the panel is powered down.', ref: ref('FIRE_ALARM') + ' Chapter 14' },\n      { id: 'DETECTOR_COVERED', sev: 'CRITICAL', text: 'Smoke or heat detector bagged, taped, capped with a construction dust cover, painted, or physically removed from its base.', ref: ref('FIRE_ALARM') + ' Chapter 17' },\n      { id: 'PULL_STATION_OBSTRUCTED', sev: 'MAJOR', text: 'Manual fire alarm box obstructed, obscured, painted over, damaged, or mounted outside the reachable range (commonly 42 in to 48 in above the floor to the operable part).', ref: ref('FIRE_ALARM') + ' Chapter 17' },\n      { id: 'NOTIFICATION_APPLIANCE_DEFECT', sev: 'MAJOR', text: 'Horn, speaker or strobe damaged, painted, obstructed, or with the strobe lens blocked or removed.', ref: ref('FIRE_ALARM') + ' Chapter 18' },\n      { id: 'SECONDARY_POWER_SUSPECT', sev: 'MAJOR', text: 'Standby batteries visibly swollen, leaking, corroded, or dated beyond their service life.', ref: ref('FIRE_ALARM') + ' Chapter 10' },\n      { id: 'ALARM_ITM_RECORD_MISSING', sev: 'MINOR', text: 'Annual inspection and test record or tag missing, illegible or lapsed at the panel.', ref: ref('FIRE_ALARM') + ' Chapter 14' }\n    ]\n  },\n\n  KITCHEN_SUPPRESSION: {\n    label: 'Commercial kitchen hood, duct and wet-chemical suppression system',\n    primary: ref('KITCHEN_SUPPRESSION'),\n    checks: [\n      { id: 'NOZZLE_MISALIGNED_OR_UNCAPPED', sev: 'CRITICAL', text: 'Discharge nozzles missing their blow-off caps or foil seals, aimed away from the appliance hazard, or clearly not matched to the appliance line-up below (a common failure after appliances are swapped or moved).', ref: ref('KITCHEN_SUPPRESSION') + '; NFPA 17A' },\n      { id: 'SYSTEM_DISABLED', sev: 'CRITICAL', text: 'Suppression cylinder gauge outside the operable range, actuator disconnected, or the system otherwise visibly out of service while cooking appliances remain in use.', ref: 'NFPA 17A' },\n      { id: 'HOOD_GREASE_ACCUMULATION', sev: 'MAJOR', text: 'Measurable grease accumulation on filters, hood interior, plenum or accessible duct surfaces.', ref: ref('KITCHEN_SUPPRESSION') + ' Chapter 11' },\n      { id: 'FILTERS_DEFECTIVE', sev: 'MAJOR', text: 'Grease filters missing, damaged, gapped, incorrectly oriented, or not forming a continuous barrier across the hood opening.', ref: ref('KITCHEN_SUPPRESSION') + ' Chapter 6' },\n      { id: 'FUSIBLE_LINKS_OVERDUE', sev: 'MAJOR', text: 'Fusible links or detectors visibly greased, painted, or dated more than 12 months ago where an annual replacement is required.', ref: 'NFPA 17A' },\n      { id: 'MANUAL_PULL_DEFECT', sev: 'MAJOR', text: 'Manual actuation station missing, obstructed, unlabelled, or not located in a path of egress at an accessible height (commonly 42 in to 48 in above the floor).', ref: ref('KITCHEN_SUPPRESSION') + ' Chapter 10' },\n      { id: 'NO_CLASS_K_NEARBY', sev: 'MAJOR', text: 'No Class K portable extinguisher visible serving the cooking hazard (maximum 30 ft travel distance), or the required placard instructing users to actuate the hood system first is missing.', ref: 'NFPA 10 6.6; ' + ref('KITCHEN_SUPPRESSION') },\n      { id: 'SEMIANNUAL_TAG_LAPSED', sev: 'MAJOR', text: 'Semi-annual inspection tag for the suppression system missing, illegible or more than 6 months old.', ref: ref('KITCHEN_SUPPRESSION') + ' Chapter 11' }\n    ]\n  },\n\n  MEANS_OF_EGRESS: {\n    label: 'Means of egress — exit doors, corridors, stairs, exit and emergency lighting',\n    primary: cb.fire_code + ' ' + cb.fire_code_edition + '; ' + ref('MEANS_OF_EGRESS'),\n    checks: [\n      { id: 'EGRESS_OBSTRUCTED', sev: 'CRITICAL', text: 'Exit door, corridor, stair, landing or exit discharge obstructed by storage, equipment, furniture, waste or parked vehicles, or the required egress width is encroached upon.', ref: ref('MEANS_OF_EGRESS') + ' Chapter 7; 29 CFR 1910.37(a)(3)' },\n      { id: 'EXIT_DOOR_LOCKED', sev: 'CRITICAL', text: 'Exit door chained, padlocked, bolted, fitted with an unapproved add-on lock, or otherwise not openable from the egress side without a key, tool or special knowledge.', ref: ref('MEANS_OF_EGRESS') + ' 7.2.1; 29 CFR 1910.36(d)' },\n      { id: 'FIRE_DOOR_WEDGED', sev: 'CRITICAL', text: 'Self-closing fire door or smoke barrier door wedged, blocked, tied or propped open by unapproved means.', ref: ref('FIRE_DOOR') },\n      { id: 'PANIC_HARDWARE_DEFECT', sev: 'CRITICAL', text: 'Required panic or fire exit hardware missing, disabled, or supplemented with additional locking devices.', ref: cb.fire_code + ' means-of-egress door provisions' },\n      { id: 'EXIT_SIGN_DEFECT', sev: 'MAJOR', text: 'Exit sign missing, not illuminated, damaged, obscured, or a directional exit sign absent where the path of travel is not obvious.', ref: ref('MEANS_OF_EGRESS') + ' 7.10' },\n      { id: 'EMERGENCY_LIGHTING_DEFECT', sev: 'MAJOR', text: 'Emergency egress illumination unit missing, damaged, indicator lamp dark, or the monthly test evidence absent.', ref: ref('MEANS_OF_EGRESS') + ' 7.9' },\n      { id: 'DEAD_END_OR_MISLEADING_PATH', sev: 'MAJOR', text: 'Path of egress is misleading — for example a mirrored or draped opening, or an exit that discharges into an enclosed or locked area.', ref: ref('MEANS_OF_EGRESS') + ' Chapter 7' }\n    ]\n  },\n\n  FIRE_DOOR: {\n    label: 'Fire-rated door assembly and opening protective',\n    primary: ref('FIRE_DOOR'),\n    checks: [\n      { id: 'DOOR_HELD_OPEN', sev: 'CRITICAL', text: 'Assembly wedged, tied, propped or held open other than by a listed hold-open device that releases on alarm.', ref: ref('FIRE_DOOR') + ' Chapter 5' },\n      { id: 'NO_LATCH_OR_CLOSE', sev: 'CRITICAL', text: 'Door fails to self-close and positively latch, latch bolt does not engage the strike, or the closer is removed, disconnected or leaking.', ref: ref('FIRE_DOOR') + ' Chapter 5' },\n      { id: 'LABEL_MISSING_OR_PAINTED', sev: 'MAJOR', text: 'Fire door or frame label missing, painted over, removed or illegible.', ref: ref('FIRE_DOOR') + ' 5.2' },\n      { id: 'CLEARANCES_EXCESSIVE', sev: 'MAJOR', text: 'Perimeter clearances exceed the permitted tolerance — commonly a maximum of 1/8 in along the top and sides of swinging doors, and a maximum of 3/4 in at the bottom.', ref: ref('FIRE_DOOR') + ' Chapter 6' },\n      { id: 'UNAPPROVED_FIELD_MODIFICATION', sev: 'MAJOR', text: 'Unlisted field modification — drilled holes, added louvres or vision panels, applied signage or kick plates beyond the permitted size, or holes left by removed hardware.', ref: ref('FIRE_DOOR') + ' Chapter 5' },\n      { id: 'GASKETING_DAMAGED', sev: 'MINOR', text: 'Smoke seals, gasketing or the door bottom seal torn, missing or painted.', ref: ref('FIRE_DOOR') },\n      { id: 'DOOR_ITM_RECORD_MISSING', sev: 'MINOR', text: 'Annual fire door inspection record or tag absent for the assembly.', ref: ref('FIRE_DOOR') + ' 5.2.1' }\n    ]\n  },\n\n  STANDPIPE_HOSE: {\n    label: 'Standpipe, hose valve, hose cabinet or fire pump',\n    primary: ref('STANDPIPE_HOSE'),\n    checks: [\n      { id: 'PUMP_NOT_AUTO', sev: 'CRITICAL', text: 'Fire pump controller not in the automatic position, showing an alarm, or the pump is visibly isolated or out of service.', ref: 'NFPA 25 Chapter 8; NFPA 20' },\n      { id: 'HOSE_VALVE_INACCESSIBLE', sev: 'CRITICAL', text: 'Hose valve or standpipe outlet obstructed, buried behind storage, or the cabinet locked without an approved means of access.', ref: 'NFPA 25 Chapter 6' },\n      { id: 'HOSE_VALVE_DEFECT', sev: 'MAJOR', text: 'Missing cap, damaged or fouled threads, visible leakage, corroded handwheel, or missing pressure-reducing valve identification.', ref: 'NFPA 25 Chapter 6' },\n      { id: 'PUMP_ROOM_DEFECT', sev: 'MAJOR', text: 'Fire pump room shows water leakage, abnormal suction or discharge gauge readings, blocked ventilation, or is used for unrelated storage.', ref: 'NFPA 25 Chapter 8' },\n      { id: 'STANDPIPE_ITM_MISSING', sev: 'MINOR', text: 'Standpipe or fire pump inspection, testing and maintenance record absent or lapsed.', ref: 'NFPA 25 4.3' }\n    ]\n  },\n\n  ELECTRICAL_HOUSEKEEPING: {\n    label: 'Electrical equipment clearances and fire-related housekeeping',\n    primary: cb.fire_code + ' ' + cb.fire_code_edition + '; ' + ref('ELECTRICAL_HOUSEKEEPING'),\n    checks: [\n      { id: 'PANEL_EXPOSED_LIVE_PARTS', sev: 'CRITICAL', text: 'Electrical panel cover missing, dead front removed, open unused breaker spaces or unsealed knockouts exposing energised parts.', ref: 'NFPA 70 408; 29 CFR 1910.303' },\n      { id: 'PANEL_WORKING_SPACE_BLOCKED', sev: 'MAJOR', text: 'Required working space in front of electrical equipment is used for storage or obstructed (commonly 36 in depth for equipment operating at 150 V or less to ground), or the dedicated equipment space above the panel is encroached upon.', ref: 'NFPA 70 110.26' },\n      { id: 'IMPROPER_WIRING_METHODS', sev: 'MAJOR', text: 'Relocatable power taps or extension cords used as permanent wiring, daisy-chained power strips, cords run through walls, doorways or ceilings, or damaged cords and open splices.', ref: cb.fire_code + ' electrical provisions; 29 CFR 1910.305' },\n      { id: 'COMBUSTIBLE_ACCUMULATION', sev: 'MAJOR', text: 'Accumulation of combustible waste, cardboard, pallets or flammable liquids in a manner creating a fire hazard, or storage against heat-producing equipment.', ref: cb.fire_code + ' general fire safety provisions' },\n      { id: 'PANEL_NOT_LABELLED', sev: 'MINOR', text: 'Circuit directory missing or inaccurate, or disconnect not legibly marked for its purpose.', ref: 'NFPA 70 110.22 and 408.4' }\n    ]\n  },\n\n  EMERGENCY_POWER: {\n    label: 'Emergency or standby power system (generator, transfer switch)',\n    primary: ref('EMERGENCY_POWER'),\n    checks: [\n      { id: 'GENERATOR_NOT_AVAILABLE', sev: 'CRITICAL', text: 'Generator in the off or manual position, control panel in alarm, batteries disconnected, or the unit visibly out of service.', ref: ref('EMERGENCY_POWER') + ' Chapter 8' },\n      { id: 'FUEL_OR_LEAK_ISSUE', sev: 'MAJOR', text: 'Fuel level below the required minimum, or visible fuel, oil or coolant leakage.', ref: ref('EMERGENCY_POWER') + ' Chapter 8' },\n      { id: 'ENCLOSURE_OBSTRUCTED', sev: 'MAJOR', text: 'Combustion air louvres, exhaust path or access clearances blocked, or the room is used for unrelated storage.', ref: ref('EMERGENCY_POWER') },\n      { id: 'GEN_TEST_RECORD_MISSING', sev: 'MINOR', text: 'Weekly inspection or monthly load-test log absent or lapsed.', ref: ref('EMERGENCY_POWER') + ' Chapter 8' }\n    ]\n  }\n};\n\n// ---------------------------------------------------------------------------\n// Prompt assembly\n// ---------------------------------------------------------------------------\nconst hint = input.equipment_hint;\nconst hintedKey = CHECKLISTS[hint] ? hint : null;\nconst activeKeys = hintedKey ? [hintedKey] : Object.keys(CHECKLISTS);\n\nfunction renderChecklist(key) {\n  const c = CHECKLISTS[key];\n  const lines = c.checks.map(function (chk, i) {\n    return '   ' + (i + 1) + '. [' + chk.sev + '] (' + chk.id + ') ' + chk.text +\n           '\\n      Authority: ' + chk.ref;\n  }).join('\\n');\n  return '## ' + key + ' — ' + c.label + '\\n' +\n         'Governing standard: ' + c.primary + '\\n' + lines;\n}\n\nconst checklistBlock = activeKeys.map(renderChecklist).join('\\n\\n');\n\nconst overlayLines = (cb.state_overlays || []).map(function (o) { return '  - ' + o; }).join('\\n');\n\nconst codeBasisBlock = [\n  'JURISDICTION      : ' + cb.jurisdiction_label + ' (' + cb.jurisdiction_resolved + ')',\n  'GOVERNING FIRE CODE: ' + cb.fire_code,\n  'EDITION           : ' + cb.fire_code_edition,\n  'LIFE SAFETY CODE  : ' + cb.life_safety_code,\n  'AHJ               : ' + cb.ahj_label,\n  'OCCUPANCY (claimed): ' + input.occupancy_type,\n  cb.osha_overlay ? 'WORKPLACE OVERLAY : ' + cb.osha_overlay : 'WORKPLACE OVERLAY : not applied (caller declared non-workplace)',\n  overlayLines ? 'STATE / LOCAL OVERLAYS:\\n' + overlayLines : ''\n].filter(Boolean).join('\\n');\n\nconst scopeInstruction = hintedKey\n  ? 'The caller has declared the subject is: ' + hintedKey + ' (' + CHECKLISTS[hintedKey].label + '). Apply that checklist. If the photograph plainly shows something else, say so in \"equipment_type\" and audit what is actually visible.'\n  : 'FIRST classify what the photograph actually shows, choosing the single best match from: ' + Object.keys(CHECKLISTS).join(', ') + '. THEN apply only that checklist. If the image shows no recognisable fire or life-safety subject, set equipment_type to \"UNDETERMINED\" and set reinspect_required to true.';\n\nconst auditPrompt = [\n  'You are a senior US fire and life-safety compliance inspector performing a PHOTO-BASED PRE-INSPECTION SCREEN.',\n  '',\n  '=== APPLICABLE CODE BASIS (authoritative for this audit) ===',\n  codeBasisBlock,\n  '',\n  'Cite ONLY the code basis above and the standards named in the checklist. This is a United States audit:',\n  'do NOT reference the National Building Code of India, NBC 2016, ISI marks, or any Indian authority. The US',\n  'equivalent of an ISI mark is a UL Listing or FM Approval mark.',\n  '',\n  '=== SCOPE ===',\n  scopeInstruction,\n  '',\n  '=== CHECKLIST ===',\n  checklistBlock,\n  '',\n  '=== SEVERITY RULES ===',\n  'CRITICAL — an immediate life-safety hazard or a system impairment: blocked or locked egress, a closed',\n  '           sprinkler control valve, a disabled or covered detection device, a missing or discharged',\n  '           extinguisher, exposed energised parts, a fire door that cannot close and latch.',\n  'MAJOR    — a genuine reduction in the level of protection that is not immediately life-threatening:',\n  '           lapsed servicing, out-of-range gauge, wrong mounting height, obstruction that still leaves access.',\n  'MINOR    — documentation, labelling or administrative shortfalls with no direct effect on performance.',\n  'Use the severity printed next to each checklist item as your baseline. You may escalate one level if the',\n  'scene makes the consequence worse, but you must justify any escalation in the \"finding\" text.',\n  '',\n  '=== EVIDENTIAL DISCIPLINE (most important section) ===',\n  '1. Report only what is genuinely VISIBLE. Never infer a date, a pressure reading or a tag punch you cannot read.',\n  '2. If a required check cannot be judged from a still photograph, do NOT record it as a deficiency and do NOT',\n  '   record it as compliant. List it in \"unverifiable_items\". Checks that are inherently unverifiable from a',\n  '   photograph include: actual agent weight or fullness, internal shell condition, functional discharge or',\n  '   trip tests, audibility and candela output, water flow and pressure readings, and travel-distance',\n  '   measurement when the surrounding area is out of frame.',\n  '3. If the image is too dark, blurred, distant, glared or cropped to support a finding, set image_quality to',\n  '   POOR and reinspect_required to true, and state precisely what a better photograph must show.',\n  '4. Set confidence LOW whenever key evidence is marginal. Understating confidence is always preferred to',\n  '   overstating it.',\n  '5. Set impairment_suspected true only where a protection system appears to be out of service or isolated,',\n  '   because that triggers a formal impairment procedure with fire watch and AHJ/insurer notification.',\n  '',\n  '=== OUTPUT ===',\n  'Return ONLY a single valid JSON object. No markdown, no code fences, no commentary before or after.',\n  'Schema:',\n  '{',\n  '  \"equipment_type\": \"one of the checklist keys, or UNDETERMINED\",',\n  '  \"equipment_subtype\": \"e.g. ABC dry chemical stored pressure, 10 lb — or null\",',\n  '  \"image_quality\": \"GOOD | FAIR | POOR\",',\n  '  \"confidence\": \"HIGH | MEDIUM | LOW\",',\n  '  \"reinspect_required\": true or false,',\n  '  \"reinspect_reasons\": [\"what specifically must be re-photographed and why\"],',\n  '  \"observations\": \"2-5 sentences describing what is actually visible in the frame\",',\n  '  \"deficiencies\": [',\n  '    {',\n  '      \"code\": \"checklist item id, e.g. GAUGE_OUT_OF_RANGE\",',\n  '      \"severity\": \"CRITICAL | MAJOR | MINOR\",',\n  '      \"finding\": \"the deficiency in one sentence\",',\n  '      \"observed\": \"the specific visual evidence in this photograph\",',\n  '      \"requirement\": \"what the code or standard requires\",',\n  '      \"code_reference\": \"e.g. NFPA 10 (2022) 7.2.2; 29 CFR 1910.157(e)(3)\",',\n  '      \"remediation\": \"the corrective action a technician should take\",',\n  '      \"verification_needed\": true or false',\n  '    }',\n  '  ],',\n  '  \"unverifiable_items\": [\"checks that a photograph cannot settle\"],',\n  '  \"impairment_suspected\": true or false,',\n  '  \"impairment_basis\": \"why, or null\"',\n  '}',\n  'Return an empty deficiencies array if nothing is wrong. Do not invent deficiencies to appear thorough.'\n].join('\\n');\n\nconst PRIMARY_MODEL = 'anthropic/claude-sonnet-4-5';\n\nconst payload = {\n  model: PRIMARY_MODEL,\n  max_tokens: 3000,\n  temperature: 0,\n  messages: [\n    {\n      role: 'user',\n      content: [\n        { type: 'image_url', image_url: { url: input.image_url } },\n        { type: 'text', text: auditPrompt }\n      ]\n    }\n  ],\n  usage: { include: true }\n};\n\nreturn [{\n  json: Object.assign({}, input, {\n    payload: payload,\n    primary_model: PRIMARY_MODEL,\n    prompt_chars: auditPrompt.length,\n    checklists_offered: activeKeys,\n    dispatched_at: new Date().toISOString()\n  })\n}];\n"
+      },
+      "id": "us-payload-0004",
+      "name": "BUILD_Vision_Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1940,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "us-vision-0005",
+      "name": "Vision_Primary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -1700,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Yo4OGxALKxIBKco8",
+          "name": "OpenRouter"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify(Object.assign({}, $('BUILD_Vision_Payload').first().json.payload, { model: 'openai/gpt-4o' })) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "us-visionfb-0006",
+      "name": "Vision_Fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -1700,
+        660
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Yo4OGxALKxIBKco8",
+          "name": "OpenRouter"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 4 — PARSE_And_Score\n * Mode: Run Once for All Items\n *\n * The v2 (India) workflow took the model's own `status` field at face value.\n * That is the wrong trust boundary for a compliance system: the verdict that\n * drives escalation must be derived from the evidence by deterministic code, so\n * that it is reviewable, testable and stable across model versions.\n *\n * This node therefore:\n *   1. Extracts JSON defensively (fences, preamble, trailing prose, trailing commas).\n *   2. Coerces and normalises the payload against the expected schema.\n *   3. DERIVES status, criticality, risk score and routing itself.\n *   4. Applies a fail-safe bias: a CRITICAL finding escalates even when the model\n *      reports LOW confidence. We would rather over-escalate a life-safety issue\n *      than suppress it behind a confidence gate.\n *   5. Records what the photograph could not settle, and refuses to present the\n *      result as a certified inspection.\n */\n\nconst raw = $input.first().json;\nconst meta = $('BUILD_Vision_Payload').first().json;\n\n// ---------------------------------------------------------------- extraction\nfunction extractJson(text) {\n  if (!text) return null;\n  let s = String(text).trim();\n\n  // Strip fenced code blocks anywhere in the response.\n  s = s.replace(/```(?:json)?/gi, '').trim();\n\n  const start = s.indexOf('{');\n  const end = s.lastIndexOf('}');\n  if (start === -1 || end === -1 || end <= start) return null;\n\n  const candidate = s.slice(start, end + 1);\n\n  try {\n    return JSON.parse(candidate);\n  } catch (e) { /* fall through to repair */ }\n\n  try {\n    // Most common LLM JSON defect: trailing commas before } or ].\n    return JSON.parse(candidate.replace(/,\\s*([}\\]])/g, '$1'));\n  } catch (e) { /* give up */ }\n\n  return null;\n}\n\nconst choice = raw && raw.choices && raw.choices[0] ? raw.choices[0] : null;\nconst content = choice && choice.message ? choice.message.content : '';\nconst parsed = extractJson(content);\n\nconst model_used = (raw && raw.model) || meta.primary_model || 'unknown';\nconst usage = (raw && raw.usage) || {};\nconst finish_reason = choice ? choice.finish_reason : null;\n\nconst audit_timestamp = new Date().toISOString();\nconst latency_ms = meta.dispatched_at\n  ? Math.max(0, new Date(audit_timestamp).getTime() - new Date(meta.dispatched_at).getTime())\n  : null;\n\n// Base envelope carried on every outcome, including hard failures.\nconst base = {\n  audit_id: meta.audit_id,\n  idempotency_key: meta.idempotency_key,\n  site_id: meta.site_id,\n  asset_tag: meta.asset_tag,\n  inspector_id: meta.inspector_id,\n  occupancy_type: meta.occupancy_type,\n  image_url: meta.image_url,\n  jurisdiction: meta.code_basis.jurisdiction_resolved,\n  code_basis: meta.code_basis,\n  unverified_standard_editions: meta.unverified_standard_editions,\n  model_used: model_used,\n  prompt_tokens: usage.prompt_tokens || null,\n  completion_tokens: usage.completion_tokens || null,\n  latency_ms: latency_ms,\n  audit_timestamp: audit_timestamp,\n  // Non-negotiable framing: this is a screening aid, never a certified inspection.\n  advisory_only: true,\n  certification_eligible: false,\n  requires_licensed_inspector_signoff: true,\n  signoff_status: 'PENDING'\n};\n\n// ------------------------------------------------------- hard failure path\nif (!parsed) {\n  const detail = finish_reason === 'length'\n    ? 'The model response was truncated before the JSON object closed (finish_reason=length).'\n    : 'No parsable JSON object was found in the model response.';\n\n  return [{\n    json: Object.assign({}, base, {\n      status: 'ERROR',\n      route_index: 4,\n      critical: false,\n      confidence: 'LOW',\n      image_quality: 'UNKNOWN',\n      equipment_type: 'UNDETERMINED',\n      equipment_subtype: null,\n      observations: 'Automated audit could not be completed. ' + detail,\n      deficiencies: [],\n      violations: ['SYSTEM_ERROR: ' + detail],\n      unverifiable_items: ['Entire checklist — the automated pass did not produce a usable result.'],\n      reinspect_required: true,\n      reinspect_reasons: ['Automated analysis failed; resubmit the photograph or inspect manually.'],\n      impairment_suspected: false,\n      impairment_basis: null,\n      risk_score: 0,\n      critical_count: 0,\n      major_count: 0,\n      minor_count: 0,\n      deficiency_count: 0,\n      remediation_due_at: null,\n      raw_model_excerpt: String(content || '').slice(0, 600)\n    })\n  }];\n}\n\n// ------------------------------------------------------------ normalisation\nfunction enumOf(value, allowed, fallback) {\n  const v = String(value === undefined || value === null ? '' : value).trim().toUpperCase();\n  return allowed.indexOf(v) !== -1 ? v : fallback;\n}\n\nfunction toArray(value) {\n  if (Array.isArray(value)) return value;\n  if (value === undefined || value === null || value === '') return [];\n  if (typeof value === 'string') {\n    try {\n      const j = JSON.parse(value);\n      return Array.isArray(j) ? j : [value];\n    } catch (e) {\n      return [value];\n    }\n  }\n  return [value];\n}\n\n// Bias unknown severities UPWARD, never downward.\nfunction normaliseSeverity(value) {\n  const v = String(value || '').trim().toUpperCase();\n  if (['CRITICAL', 'IMMEDIATE', 'LIFE-SAFETY', 'LIFE SAFETY', 'SEVERE'].indexOf(v) !== -1) return 'CRITICAL';\n  if (['MAJOR', 'HIGH', 'SERIOUS', 'SIGNIFICANT'].indexOf(v) !== -1) return 'MAJOR';\n  if (['MINOR', 'LOW', 'MODERATE', 'ADMINISTRATIVE', 'DOCUMENTATION'].indexOf(v) !== -1) return 'MINOR';\n  return 'MAJOR';\n}\n\nconst equipment_type = String(parsed.equipment_type || 'UNDETERMINED').trim().toUpperCase().replace(/[\\s-]+/g, '_');\nconst equipment_subtype = parsed.equipment_subtype ? String(parsed.equipment_subtype).slice(0, 200) : null;\nconst image_quality = enumOf(parsed.image_quality, ['GOOD', 'FAIR', 'POOR'], 'FAIR');\nconst confidence = enumOf(parsed.confidence, ['HIGH', 'MEDIUM', 'LOW'], 'LOW');\n\n// Normalise, de-duplicate by checklist id, and cap to keep notifications sane.\nconst seen = {};\nconst deficiencies = toArray(parsed.deficiencies)\n  .filter(function (d) { return d && typeof d === 'object'; })\n  .map(function (d) {\n    return {\n      code: String(d.code || 'UNSPECIFIED').trim().toUpperCase().replace(/[\\s-]+/g, '_').slice(0, 64),\n      severity: normaliseSeverity(d.severity),\n      finding: String(d.finding || '').trim().slice(0, 500),\n      observed: String(d.observed || '').trim().slice(0, 500),\n      requirement: String(d.requirement || '').trim().slice(0, 500),\n      code_reference: String(d.code_reference || '').trim().slice(0, 240),\n      remediation: String(d.remediation || '').trim().slice(0, 500),\n      verification_needed: d.verification_needed === true\n    };\n  })\n  .filter(function (d) {\n    if (!d.finding) return false;\n    if (seen[d.code]) return false;\n    seen[d.code] = true;\n    return true;\n  })\n  .slice(0, 25);\n\nconst unverifiable_items = toArray(parsed.unverifiable_items)\n  .map(function (u) { return String(u).trim().slice(0, 300); })\n  .filter(Boolean)\n  .slice(0, 25);\n\nconst reinspect_reasons = toArray(parsed.reinspect_reasons)\n  .map(function (r) { return String(r).trim().slice(0, 300); })\n  .filter(Boolean)\n  .slice(0, 15);\n\n// ------------------------------------------------------------------ scoring\nconst critical_count = deficiencies.filter(function (d) { return d.severity === 'CRITICAL'; }).length;\nconst major_count = deficiencies.filter(function (d) { return d.severity === 'MAJOR'; }).length;\nconst minor_count = deficiencies.filter(function (d) { return d.severity === 'MINOR'; }).length;\n\nconst SEVERITY_WEIGHT = { CRITICAL: 100, MAJOR: 25, MINOR: 5 };\nconst risk_score = Math.min(\n  100,\n  critical_count * SEVERITY_WEIGHT.CRITICAL +\n  major_count * SEVERITY_WEIGHT.MAJOR +\n  minor_count * SEVERITY_WEIGHT.MINOR\n);\n\nconst impairment_suspected = parsed.impairment_suspected === true;\nconst impairment_basis = parsed.impairment_basis ? String(parsed.impairment_basis).slice(0, 500) : null;\n\nconst model_wants_reinspect = parsed.reinspect_required === true;\nconst evidence_is_weak = confidence === 'LOW' || image_quality === 'POOR';\nconst needs_reinspect = model_wants_reinspect || evidence_is_weak;\n\nconst has_critical = critical_count > 0 || impairment_suspected;\n\n// ------------------------------------------------- deterministic status\n// Precedence is deliberate:\n//   critical first (fail-safe: never let a confidence gate hide a life-safety\n//   finding), then weak evidence, then ordinary deficiencies, then clean.\nlet status;\nlet route_index;\n\nif (has_critical) {\n  status = 'NON-COMPLIANT';\n  route_index = 0;                       // CRITICAL escalation\n} else if (needs_reinspect) {\n  status = 'REINSPECT';\n  route_index = 2;\n} else if (major_count > 0) {\n  status = 'NON-COMPLIANT';\n  route_index = 1;\n} else if (minor_count > 0) {\n  status = 'CONDITIONAL';                // deficiencies noted, not an outright fail\n  route_index = 1;\n} else {\n  status = 'COMPLIANT';\n  route_index = 3;\n}\n\n// Remediation SLA driven by the worst severity present.\nconst SLA_HOURS = { CRITICAL: 0, MAJOR: 72, MINOR: 720 };\nlet sla_hours = null;\nif (critical_count > 0 || impairment_suspected) sla_hours = SLA_HOURS.CRITICAL;\nelse if (major_count > 0) sla_hours = SLA_HOURS.MAJOR;\nelse if (minor_count > 0) sla_hours = SLA_HOURS.MINOR;\n\nconst remediation_due_at = sla_hours === null\n  ? null\n  : new Date(new Date(audit_timestamp).getTime() + sla_hours * 3600 * 1000).toISOString();\n\n// Backward-compatible flat string list, so the existing FIREHAWK UI (which\n// renders `violations` as strings) keeps working against this workflow unchanged.\nconst violations = deficiencies.map(function (d) {\n  return '[' + d.severity + '] ' + d.finding + (d.code_reference ? ' (' + d.code_reference + ')' : '');\n});\n\n// A still photograph can never certify compliance. Say so explicitly.\nconst scope_note = status === 'COMPLIANT'\n  ? 'No deficiencies were visible in this photograph. This is not a certification of compliance: ' +\n    unverifiable_items.length + ' check(s) cannot be settled from a still image and require a physical inspection.'\n  : 'Photo-based screening result. A licensed or certified inspector must verify findings on site before ' +\n    'any enforcement, certification or record-of-inspection use.';\n\nreturn [{\n  json: Object.assign({}, base, {\n    status: status,\n    route_index: route_index,\n    critical: has_critical,\n    equipment_type: equipment_type,\n    equipment_subtype: equipment_subtype,\n    image_quality: image_quality,\n    confidence: confidence,\n    confidence_gated: has_critical && evidence_is_weak,\n    observations: String(parsed.observations || '').trim().slice(0, 2000),\n    deficiencies: deficiencies,\n    violations: violations,\n    unverifiable_items: unverifiable_items,\n    reinspect_required: needs_reinspect,\n    reinspect_reasons: reinspect_reasons,\n    impairment_suspected: impairment_suspected,\n    impairment_basis: impairment_basis,\n    risk_score: risk_score,\n    critical_count: critical_count,\n    major_count: major_count,\n    minor_count: minor_count,\n    deficiency_count: deficiencies.length,\n    sla_hours: sla_hours,\n    remediation_due_at: remediation_due_at,\n    scope_note: scope_note\n  })\n}];\n"
+      },
+      "id": "us-score-0007",
+      "name": "PARSE_And_Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 5 — SHAPE_DbRow\n * Mode: Run Once for All Items\n *\n * Emits an object whose keys map 1:1 onto the columns of field_audit_us_logs, so\n * the Postgres node can use \"Map Automatically\". Keeping the projection in a code\n * node (rather than 30 hand-mapped fields in the node UI) means the schema is\n * reviewable in git and survives workflow re-import.\n *\n * jsonb columns are passed as JSON strings, which the Postgres driver casts\n * cleanly and which avoids ambiguity over object serialisation.\n */\n\nconst d = $input.first().json;\n\nreturn [{\n  json: {\n    audit_id: d.audit_id,\n    idempotency_key: d.idempotency_key,\n    site_id: d.site_id,\n    asset_tag: d.asset_tag || null,\n    inspector_id: d.inspector_id,\n    jurisdiction: d.jurisdiction,\n    ahj_label: d.code_basis ? d.code_basis.ahj_label : null,\n    occupancy_type: d.occupancy_type,\n    code_basis: JSON.stringify(d.code_basis || {}),\n    equipment_type: d.equipment_type,\n    equipment_subtype: d.equipment_subtype,\n    status: d.status,\n    critical: d.critical === true,\n    confidence: d.confidence,\n    image_quality: d.image_quality,\n    risk_score: d.risk_score,\n    deficiency_count: d.deficiency_count,\n    critical_count: d.critical_count,\n    major_count: d.major_count,\n    minor_count: d.minor_count,\n    deficiencies: JSON.stringify(d.deficiencies || []),\n    violations: JSON.stringify(d.violations || []),\n    unverifiable_items: JSON.stringify(d.unverifiable_items || []),\n    observations: d.observations,\n    impairment_suspected: d.impairment_suspected === true,\n    impairment_basis: d.impairment_basis,\n    reinspect_required: d.reinspect_required === true,\n    reinspect_reasons: JSON.stringify(d.reinspect_reasons || []),\n    image_url: d.image_url,\n    model_used: d.model_used,\n    prompt_tokens: d.prompt_tokens,\n    completion_tokens: d.completion_tokens,\n    latency_ms: d.latency_ms,\n    advisory_only: d.advisory_only === true,\n    signoff_status: d.signoff_status,\n    sla_hours: d.sla_hours,\n    remediation_due_at: d.remediation_due_at,\n    audit_timestamp: d.audit_timestamp\n  }\n}];\n"
+      },
+      "id": "us-dbrow-0008",
+      "name": "SHAPE_DbRow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "field_audit_us_logs",
+          "mode": "list",
+          "cachedResultName": "field_audit_us_logs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "audit_id"
+          ],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "us-log-0009",
+      "name": "LOG_Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1000,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "n7fXon6ujJTrnF7w",
+          "name": "Postgres account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 6 — BUILD_Report\n * Mode: Run Once for All Items\n *\n * Builds every outbound representation of the audit in one place: Slack mrkdwn,\n * Telegram HTML, an HTML email body, a plain-text alert, and — where a protection\n * system appears to be out of service — a formal impairment notice.\n *\n * Reads the audit from PARSE_And_Score by name rather than from the immediate\n * input, because the preceding Postgres node replaces the item payload with its\n * own result. Persistence success is inferred from that Postgres output.\n *\n * Two bugs carried by the v2 (India) builder are fixed here:\n *   - Telegram is sent with parse_mode HTML, so any &, < or > in model-generated\n *     text (dimensions such as <1/8 in are common) must be entity-escaped or the\n *     Telegram API rejects the message.\n *   - Timestamps are rendered in the site's own US timezone rather than a single\n *     hardcoded zone.\n */\n\nconst a = $('PARSE_And_Score').first().json;\nconst dbResult = $input.first().json || {};\n\n// The Postgres node runs with onError=continueRegularOutput, so a database\n// outage degrades to \"not persisted\" instead of losing the audit entirely.\nconst persisted = !(dbResult.error || dbResult.$error);\n\nconst cb = a.code_basis || {};\nconst tz = cb.timezone || 'America/New_York';\n\n// NOTE: do NOT use dateStyle/timeStyle here. Intl forbids combining those\n// shorthands with component options such as timeZoneName, and throws\n// \"Invalid option\" — which silently degraded every notification timestamp to a\n// raw UTC ISO string. Explicit components are required to render the zone\n// abbreviation (PDT / EDT / MST ...), which US field crews rely on.\nfunction localTime(iso) {\n  if (!iso) return 'n/a';\n  try {\n    return new Date(iso).toLocaleString('en-US', {\n      timeZone: tz,\n      year: 'numeric',\n      month: 'short',\n      day: '2-digit',\n      hour: '2-digit',\n      minute: '2-digit',\n      timeZoneName: 'short'\n    });\n  } catch (e) {\n    // Unknown zone or a runtime without full ICU: degrade to UTC ISO rather\n    // than losing the timestamp entirely.\n    return iso + ' (UTC)';\n  }\n}\n\n// Telegram HTML parse mode: escape the three reserved entities.\nfunction esc(text) {\n  return String(text === undefined || text === null ? '' : text)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nconst localTs = localTime(a.audit_timestamp);\nconst localDue = a.remediation_due_at ? localTime(a.remediation_due_at) : null;\n\nconst PRESENTATION = {\n  'NON-COMPLIANT': { emoji: '\\uD83D\\uDD34', color: '#dc2626', headline: 'AUDIT FAILED' },\n  CONDITIONAL:     { emoji: '\\uD83D\\uDFE1', color: '#f59e0b', headline: 'DEFICIENCIES NOTED' },\n  REINSPECT:       { emoji: '\\uD83D\\uDCF8', color: '#3b82f6', headline: 'RE-INSPECTION REQUIRED' },\n  COMPLIANT:       { emoji: '\\uD83D\\uDFE2', color: '#059669', headline: 'NO DEFICIENCIES VISIBLE' },\n  ERROR:           { emoji: '\\u26A0\\uFE0F', color: '#6b7280', headline: 'AUDIT SYSTEM ERROR' }\n};\n\nconst p = PRESENTATION[a.status] || PRESENTATION.ERROR;\nconst headline = a.critical ? 'CRITICAL — IMMEDIATE ACTION REQUIRED' : p.headline;\n\n// Some jurisdictions carry a full sentence as their \"edition\" (Texas is a good\n// example, because municipal adoption varies), so only inline the edition when\n// it is short enough to read as a single label.\nconst editionShort = String(cb.fire_code_edition || '');\nconst codeLine = cb.fire_code\n  ? cb.fire_code + (editionShort && editionShort.length <= 24 ? ' ' + editionShort : '')\n  : 'code basis unresolved';\n\nconst actionText = a.critical\n  ? 'Dispatch immediately. Isolate or protect the affected area, consider a fire watch, and notify the ' + (cb.ahj_label || 'AHJ') + ' where a protection system is impaired.'\n  : a.status === 'NON-COMPLIANT'\n    ? 'Assign corrective work. Target completion within ' + a.sla_hours + ' hours (' + (localDue || 'n/a') + ').'\n    : a.status === 'CONDITIONAL'\n      ? 'Log administrative corrections; complete within 30 days (' + (localDue || 'n/a') + ').'\n      : a.status === 'REINSPECT'\n        ? 'Return a better photograph before this asset can be screened.'\n        : 'No action required from this screen. A physical inspection is still required for certification.';\n\n// ---------------------------------------------------------------- line items\nconst defLines = (a.deficiencies || []).map(function (d, i) {\n  return (i + 1) + '. [' + d.severity + '] ' + d.finding +\n         '\\n     Observed : ' + d.observed +\n         '\\n     Required : ' + d.requirement +\n         '\\n     Authority: ' + d.code_reference +\n         '\\n     Fix      : ' + d.remediation;\n});\n\nconst bodyItems = a.status === 'REINSPECT' && (a.deficiencies || []).length === 0\n  ? (a.reinspect_reasons || [])\n  : (defLines.length ? defLines : ['None recorded.']);\n\nconst itemBlockPlain = bodyItems.length ? bodyItems.join('\\n') : 'None recorded.';\n\nconst unverifiableBlock = (a.unverifiable_items || []).length\n  ? (a.unverifiable_items || []).map(function (u, i) { return '  ' + (i + 1) + '. ' + u; }).join('\\n')\n  : '  None flagged.';\n\n// --------------------------------------------------------- impairment notice\n// NFPA 25 Chapter 15 (and the equivalent NFPA 1 / IFC provisions) require a\n// formal impairment procedure when a water-based protection system is out of\n// service. This produces the paperwork trigger rather than burying it in prose.\nlet impairment_notice = null;\nif (a.impairment_suspected || a.critical) {\n  impairment_notice = [\n    'SUSPECTED FIRE PROTECTION SYSTEM IMPAIRMENT — ACTION CHECKLIST',\n    '',\n    'Audit ID     : ' + a.audit_id,\n    'Site         : ' + a.site_id,\n    'Asset        : ' + a.equipment_type + (a.equipment_subtype ? ' / ' + a.equipment_subtype : ''),\n    'Detected     : ' + localTs,\n    'Basis        : ' + (a.impairment_basis || 'One or more CRITICAL deficiencies were identified.'),\n    'Jurisdiction : ' + (cb.jurisdiction_label || 'unknown') + ' — ' + codeLine,\n    '',\n    'Required steps for the impairment coordinator:',\n    '  1. Verify the condition on site. Do not act on the photograph alone.',\n    '  2. If a system is confirmed out of service, assign an impairment tag at the',\n    '     main control valve or panel.',\n    '  3. Evaluate the need for a fire watch or other approved interim measures for',\n    '     the duration of the impairment.',\n    '  4. Notify the ' + (cb.ahj_label || 'Authority Having Jurisdiction') + ', the property',\n    '     insurer, the building owner and affected occupants.',\n    '  5. Record the start time, cause, interim measures and restoration time.',\n    '  6. Confirm the system is returned to service and remove the tag.',\n    '',\n    'Reference: NFPA 25 Chapter 15 (impairments), plus the impairment provisions of',\n    '           ' + codeLine + '.',\n    '',\n    'This notice was generated from an AI photo screen and is advisory. It does not',\n    'itself constitute a code-required impairment record.'\n  ].join('\\n');\n}\n\n// ------------------------------------------------------------- plain / email\nconst plainAlert = [\n  p.emoji + ' ' + headline,\n  '\\u2501'.repeat(52),\n  'Audit ID    : ' + a.audit_id,\n  'Site ID     : ' + a.site_id + (a.asset_tag ? '  (asset ' + a.asset_tag + ')' : ''),\n  'Jurisdiction: ' + (cb.jurisdiction_label || 'unknown'),\n  'Code basis  : ' + (cb.fire_code || 'unresolved'),\n  'Edition     : ' + (cb.fire_code_edition || 'unresolved'),\n  'AHJ         : ' + (cb.ahj_label || 'unknown'),\n  'Equipment   : ' + a.equipment_type + (a.equipment_subtype ? ' / ' + a.equipment_subtype : ''),\n  'Status      : ' + a.status + (a.critical ? '  [CRITICAL]' : ''),\n  'Risk score  : ' + a.risk_score + '/100   (C:' + a.critical_count + ' M:' + a.major_count + ' m:' + a.minor_count + ')',\n  'Confidence  : ' + a.confidence + '   Image quality: ' + a.image_quality,\n  'Inspector   : ' + a.inspector_id,\n  'Timestamp   : ' + localTs,\n  localDue ? 'Correct by  : ' + localDue : null,\n  '',\n  'OBSERVATIONS:',\n  '  ' + (a.observations || 'None recorded.'),\n  '',\n  (a.status === 'REINSPECT' && defLines.length === 0 ? 'RE-INSPECTION REASONS:' : 'FINDINGS:'),\n  itemBlockPlain,\n  '',\n  'NOT VERIFIABLE FROM A PHOTOGRAPH:',\n  unverifiableBlock,\n  '',\n  '\\u2501'.repeat(52),\n  'ACTION: ' + actionText,\n  '',\n  'SCOPE: ' + a.scope_note,\n  cb.requires_ahj_confirmation\n    ? 'NOTE: Code edition and local amendments must be confirmed with the AHJ.'\n    : null,\n  !cb.code_basis_confident\n    ? 'NOTE: No exact jurisdiction match; the model-code baseline was applied.'\n    : null,\n  a.confidence_gated\n    ? 'NOTE: Escalated on a CRITICAL finding despite weak photographic evidence (fail-safe).'\n    : null,\n  !persisted\n    ? 'NOTE: This audit could not be written to the audit database. Retain this alert.'\n    : null,\n  'FIREHAWK US \\u2014 advisory AI screen, pending licensed inspector sign-off.'\n].filter(function (l) { return l !== null; }).join('\\n');\n\n// ------------------------------------------------------------------- slack\nconst slackItems = bodyItems.map(function (t) { return '\\u2022 ' + t; }).join('\\n');\n\nconst slackMessage = [\n  ':fire: *' + headline + '*',\n  '*Audit:* `' + a.audit_id + '`',\n  '*Site:* `' + a.site_id + '`   *Equipment:* ' + a.equipment_type,\n  '*Jurisdiction:* ' + (cb.jurisdiction_label || 'unknown') + '   *Code:* ' + codeLine,\n  '*Status:* `' + a.status + '`' + (a.critical ? '  :rotating_light: *CRITICAL*' : ''),\n  '*Risk:* ' + a.risk_score + '/100  (C:' + a.critical_count + ' M:' + a.major_count + ' m:' + a.minor_count + ')',\n  '*Confidence:* ' + a.confidence + '   *Image:* ' + a.image_quality,\n  '*When:* ' + localTs + (localDue ? '   *Correct by:* ' + localDue : ''),\n  '',\n  '*Observations:* ' + (a.observations || 'None recorded.'),\n  '',\n  '*' + (a.status === 'REINSPECT' && defLines.length === 0 ? 'Re-inspection reasons' : 'Findings') + ':*',\n  slackItems,\n  '',\n  '*Action:* ' + actionText,\n  '_' + a.scope_note + '_'\n].join('\\n');\n\n// ---------------------------------------------------------------- telegram\nconst telegramMessage = [\n  p.emoji + ' <b>' + esc(headline) + '</b>',\n  '',\n  '<b>Audit:</b> <code>' + esc(a.audit_id) + '</code>',\n  '<b>Site:</b> <code>' + esc(a.site_id) + '</code>',\n  '<b>Equipment:</b> ' + esc(a.equipment_type),\n  '<b>Jurisdiction:</b> ' + esc(cb.jurisdiction_label || 'unknown'),\n  '<b>Code basis:</b> ' + esc(codeLine),\n  '<b>Status:</b> <code>' + esc(a.status) + '</code>' + (a.critical ? ' \\u26A0\\uFE0F' : ''),\n  '<b>Risk:</b> ' + a.risk_score + '/100 (C:' + a.critical_count + ' M:' + a.major_count + ' m:' + a.minor_count + ')',\n  '<b>Confidence:</b> ' + esc(a.confidence) + ' | <b>Image:</b> ' + esc(a.image_quality),\n  '<b>When:</b> ' + esc(localTs),\n  localDue ? '<b>Correct by:</b> ' + esc(localDue) : null,\n  '',\n  '<b>' + (a.status === 'REINSPECT' && defLines.length === 0 ? 'Re-inspection reasons' : 'Findings') + ':</b>',\n  bodyItems.map(function (t) { return '\\u2022 ' + esc(t); }).join('\\n'),\n  '',\n  '<b>Action:</b> ' + esc(actionText),\n  '<i>' + esc(a.scope_note) + '</i>'\n].filter(function (l) { return l !== null; }).join('\\n');\n\n// -------------------------------------------------------------------- email\nfunction row(label, value) {\n  return '<tr><td style=\"padding:8px;border-bottom:1px solid #e5e7eb;font-weight:bold;width:38%\">' +\n         esc(label) + '</td><td style=\"padding:8px;border-bottom:1px solid #e5e7eb\">' + esc(value) + '</td></tr>';\n}\n\nconst SEV_COLOR = { CRITICAL: '#dc2626', MAJOR: '#f59e0b', MINOR: '#6b7280' };\n\nconst defHtml = (a.deficiencies || []).length\n  ? (a.deficiencies || []).map(function (d) {\n      return '<div style=\"border-left:4px solid ' + (SEV_COLOR[d.severity] || '#6b7280') +\n        ';padding:10px 14px;margin:10px 0;background:#fff\">' +\n        '<div style=\"font-weight:bold;color:' + (SEV_COLOR[d.severity] || '#6b7280') + '\">' +\n        esc(d.severity) + ' \\u2014 ' + esc(d.finding) + '</div>' +\n        '<div style=\"font-size:13px;color:#4b5563;margin-top:6px\"><b>Observed:</b> ' + esc(d.observed) + '</div>' +\n        '<div style=\"font-size:13px;color:#4b5563\"><b>Required:</b> ' + esc(d.requirement) + '</div>' +\n        '<div style=\"font-size:13px;color:#4b5563\"><b>Authority:</b> ' + esc(d.code_reference) + '</div>' +\n        '<div style=\"font-size:13px;color:#4b5563\"><b>Remediation:</b> ' + esc(d.remediation) + '</div>' +\n        '</div>';\n    }).join('')\n  : '<p style=\"color:#4b5563\">' +\n    (a.status === 'REINSPECT'\n      ? (a.reinspect_reasons || []).map(function (r) { return esc(r); }).join('<br>')\n      : 'No deficiencies recorded.') +\n    '</p>';\n\nconst emailHtml = [\n  '<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:0 auto;border:1px solid #ddd;border-radius:8px;overflow:hidden\">',\n  '<div style=\"background:' + p.color + ';color:#fff;padding:20px;text-align:center\">',\n  '<h2 style=\"margin:0\">' + p.emoji + ' ' + esc(headline) + '</h2>',\n  '<div style=\"font-size:13px;opacity:.9;margin-top:6px\">' + esc(codeLine) + '</div>',\n  '</div>',\n  '<div style=\"padding:20px;background:#f9fafb\"><table style=\"width:100%;border-collapse:collapse\">',\n  row('Audit ID', a.audit_id),\n  row('Site ID', a.site_id + (a.asset_tag ? '  (asset ' + a.asset_tag + ')' : '')),\n  row('Jurisdiction', cb.jurisdiction_label || 'unknown'),\n  row('AHJ', cb.ahj_label || 'unknown'),\n  row('Occupancy', a.occupancy_type),\n  row('Equipment', a.equipment_type + (a.equipment_subtype ? ' / ' + a.equipment_subtype : '')),\n  row('Status', a.status + (a.critical ? '  [CRITICAL]' : '')),\n  row('Risk score', a.risk_score + '/100  (critical ' + a.critical_count + ', major ' + a.major_count + ', minor ' + a.minor_count + ')'),\n  row('Confidence', a.confidence + '   |   Image quality: ' + a.image_quality),\n  row('Inspector', a.inspector_id),\n  row('Timestamp', localTs),\n  localDue ? row('Correct by', localDue) : '',\n  row('Model', a.model_used),\n  '</table></div>',\n  '<div style=\"padding:0 20px\"><h3 style=\"color:#374151\">Observations</h3>',\n  '<p style=\"color:#4b5563;line-height:1.6\">' + esc(a.observations || 'None recorded.') + '</p></div>',\n  '<div style=\"padding:0 20px 10px\"><h3 style=\"color:#374151\">Findings</h3>' + defHtml + '</div>',\n  '<div style=\"padding:0 20px 10px\"><h3 style=\"color:#374151\">Not verifiable from a photograph</h3><ul style=\"color:#4b5563\">',\n  ((a.unverifiable_items || []).length\n    ? (a.unverifiable_items || []).map(function (u) { return '<li>' + esc(u) + '</li>'; }).join('')\n    : '<li>None flagged.</li>'),\n  '</ul></div>',\n  '<div style=\"background:#eff6ff;padding:15px 20px;border-top:1px solid #ddd\"><b>Required action:</b> ' + esc(actionText) + '</div>',\n  '<div style=\"background:#fffbeb;padding:15px 20px;border-top:1px solid #fde68a;font-size:12px;color:#92400e\">',\n  '<b>Scope and limitations:</b> ' + esc(a.scope_note),\n  cb.requires_ahj_confirmation ? '<br>Code edition and local amendments must be confirmed with the AHJ before enforcement use.' : '',\n  !cb.code_basis_confident ? '<br>No exact jurisdiction match was found; the model-code baseline was applied.' : '',\n  (a.unverified_standard_editions || []).length ? '<br>Confirm the editions in force for: ' + esc((a.unverified_standard_editions || []).join(', ')) + '.' : '',\n  !persisted ? '<br><b>This audit was not written to the audit database.</b> Retain this email as the record.' : '',\n  '</div>',\n  '<div style=\"background:#f3f4f6;padding:10px 20px;font-size:12px;color:#6b7280;text-align:center\">',\n  'FIREHAWK US \\u2014 AI pre-inspection screen \\u2014 pending licensed inspector sign-off \\u2014 ' + esc(localTs),\n  '</div></div>'\n].join('');\n\nconst subjectPrefix = a.critical ? '[CRITICAL] ' : '';\n\nreturn [{\n  json: Object.assign({}, a, {\n    persisted: persisted,\n    local_timestamp: localTs,\n    local_remediation_due: localDue,\n    headline: headline,\n    action_text: actionText,\n    impairment_notice: impairment_notice,\n    alert: plainAlert,\n    slack_message: slackMessage,\n    telegram_message: telegramMessage,\n    email_html: emailHtml,\n    email_subject: subjectPrefix + p.emoji + ' Fire Audit ' + a.status + ' \\u2014 ' + a.site_id + ' \\u2014 ' + a.equipment_type\n  })\n}];\n"
+      },
+      "id": "us-report-0010",
+      "name": "BUILD_Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 5,
+        "output": "={{ $json.route_index }}",
+        "options": {}
+      },
+      "id": "us-route-0011",
+      "name": "ROUTE_Outcome",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -560,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "arvami-stack-errors",
+          "mode": "name"
+        },
+        "text": "={{ $json.slack_message }}",
+        "otherOptions": {}
+      },
+      "id": "us-slack-0012",
+      "name": "SEND_Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        -300,
+        60
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "FERICzhUKPyyuxUt",
+          "name": "Slack(Arvami Stack Notifier)"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "chatId": "1020714503",
+        "text": "={{ $json.telegram_message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "us-telegram-0013",
+      "name": "SEND_Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -300,
+        260
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "0JbTkG1AwoZemMu1",
+          "name": "psylentbot"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "sendTo": "shrinand.shirwal84@gmail.com",
+        "subject": "={{ $json.email_subject }}",
+        "emailType": "html",
+        "message": "={{ $json.email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "us-email-0014",
+      "name": "SEND_Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -300,
+        470
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "C0orKvBTXhFFkCxr",
+          "name": "Advaita"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FIREHAWK_WORKORDER_WEBHOOK }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ external_id: $json.audit_id, site_id: $json.site_id, priority: 'P1', asset: $json.equipment_type, asset_tag: $json.asset_tag, summary: $json.headline, detail: $json.alert, impairment_notice: $json.impairment_notice, due_at: $json.remediation_due_at, risk_score: $json.risk_score }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "us-workorder-0015",
+      "name": "CREATE_WorkOrder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -300,
+        680
+      ],
+      "onError": "continueRegularOutput",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * NODE 7 — SHAPE_Response\n * Mode: Run Once for All Items\n *\n * Returns a curated API surface to the caller. BUILD_Report carries several\n * kilobytes of Slack/Telegram/email bodies that no HTTP client needs, so the\n * response contract is defined explicitly here rather than dumping $json.\n *\n * Backward compatibility: every field the existing FIREHAWK dashboard reads\n * (status, confidence, equipment_type, audit_timestamp, observations,\n * violations) is preserved with the same names and types, so the UI works\n * against this workflow with no changes. Everything else is additive.\n */\n\nconst a = $input.first().json;\nconst cb = a.code_basis || {};\n\nreturn [{\n  json: {\n    // ---- fields the existing dashboard already consumes ----\n    status: a.status,\n    confidence: a.confidence,\n    equipment_type: a.equipment_type,\n    observations: a.observations,\n    violations: a.violations || [],\n    site_id: a.site_id,\n    audit_timestamp: a.audit_timestamp,\n\n    // ---- identity / traceability ----\n    audit_id: a.audit_id,\n    idempotency_key: a.idempotency_key,\n    persisted: a.persisted === true,\n\n    // ---- richer US findings ----\n    equipment_subtype: a.equipment_subtype,\n    critical: a.critical === true,\n    risk_score: a.risk_score,\n    severity_counts: {\n      critical: a.critical_count,\n      major: a.major_count,\n      minor: a.minor_count\n    },\n    deficiencies: a.deficiencies || [],\n    unverifiable_items: a.unverifiable_items || [],\n    image_quality: a.image_quality,\n    reinspect_required: a.reinspect_required === true,\n    reinspect_reasons: a.reinspect_reasons || [],\n\n    // ---- impairment ----\n    impairment_suspected: a.impairment_suspected === true,\n    impairment_basis: a.impairment_basis,\n    impairment_notice: a.impairment_notice,\n\n    // ---- remediation ----\n    sla_hours: a.sla_hours,\n    remediation_due_at: a.remediation_due_at,\n    local_timestamp: a.local_timestamp,\n    local_remediation_due: a.local_remediation_due,\n    action_text: a.action_text,\n\n    // ---- code basis actually applied (display this in the UI) ----\n    code_basis: {\n      jurisdiction_requested: cb.jurisdiction_requested,\n      jurisdiction_resolved: cb.jurisdiction_resolved,\n      jurisdiction_label: cb.jurisdiction_label,\n      exact_match: cb.exact_match,\n      fire_code: cb.fire_code,\n      fire_code_edition: cb.fire_code_edition,\n      life_safety_code: cb.life_safety_code,\n      ahj_label: cb.ahj_label,\n      osha_overlay: cb.osha_overlay,\n      state_overlays: cb.state_overlays || [],\n      timezone: cb.timezone,\n      requires_ahj_confirmation: cb.requires_ahj_confirmation,\n      code_basis_confident: cb.code_basis_confident,\n      verified_on: cb.verified_on\n    },\n    unverified_standard_editions: a.unverified_standard_editions || [],\n\n    // ---- governance: never let a caller mistake this for a certification ----\n    advisory_only: true,\n    certification_eligible: false,\n    requires_licensed_inspector_signoff: true,\n    signoff_status: a.signoff_status || 'PENDING',\n    scope_note: a.scope_note,\n\n    // ---- observability ----\n    model_used: a.model_used,\n    latency_ms: a.latency_ms,\n    prompt_tokens: a.prompt_tokens,\n    completion_tokens: a.completion_tokens\n  }\n}];\n"
+      },
+      "id": "us-respshape-0016",
+      "name": "SHAPE_Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "us-respond-0017",
+      "name": "Respond_to_Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        200,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1 — Intake and code basis\n\n`VALIDATE_Input` hard-validates the body and closes the SSRF hole in the India workflow: the image URL must be **https** on an **allow-listed object store**, and private / loopback hosts are refused.\n\n`RESOLVE_CodeBasis` is the reason this is a separate workflow rather than a prompt tweak. India has one national code (NBC 2016) plus one AHJ. The US has **IFC 2024 in ~41 states, NFPA 1/101 in Florida, California's own Title 24/19, NYC's FDNY code**, and a federal **OSHA 29 CFR 1910** overlay on workplaces (displaced by a State Plan in 21+ states).\n\nSo the applicable code is **data**, resolved per request. Adding a jurisdiction is a registry edit, not a prompt rewrite. Unmatched jurisdictions fall back to the model-code baseline and are **flagged**, never silently guessed.",
+        "height": 460,
+        "width": 700,
+        "color": 4
+      },
+      "id": "us-note-0018",
+      "name": "Note 0018",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -2620,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2 — Vision with fallback\n\n`Vision_Primary` (Claude Sonnet 4.5) has a 120 s timeout and 3 retries. On hard failure the error output routes to `Vision_Fallback`, which replays the **same payload** against a second model so a single provider incident does not drop an audit.\n\n`temperature: 0` for run-to-run stability on the same photograph.",
+        "height": 300,
+        "width": 420,
+        "color": 5
+      },
+      "id": "us-note-0019",
+      "name": "Note 0019",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1900,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3 — Deterministic verdict (the important part)\n\nv2 trusted the model's own `status`. That is the wrong trust boundary. `PARSE_And_Score` **derives** the verdict in reviewable code:\n\n- Severity per US practice: CRITICAL / MAJOR / MINOR\n- Unknown severities are biased **upward**, never down\n- **Fail-safe:** a CRITICAL finding escalates even at LOW confidence — a confidence gate must never hide a life-safety issue\n- Only-MINOR resolves to `CONDITIONAL`, not a blunt fail\n- The model must declare what a photo **cannot** settle (`unverifiable_items`), and a clean screen is never reported as a certification\n\n`LOG_Audit` continues on error so a Postgres outage degrades to `persisted: false` instead of losing a life-safety finding.",
+        "height": 500,
+        "width": 640,
+        "color": 3
+      },
+      "id": "us-note-0020",
+      "name": "Note 0020",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1460,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4 — Routing and escalation\n\n`route_index` is computed upstream; the Switch is a dumb demultiplexer so all business logic stays in one testable place.\n\n`0` CRITICAL → Slack + Telegram + email + work order, with an **NFPA 25 Ch. 15 impairment checklist** (tag, fire watch, notify AHJ and insurer)\n`1` DEFICIENT → Slack + Telegram + email\n`2` REINSPECT → Telegram only (photo quality problem, not a site problem)\n`3` COMPLIANT → respond only, no alert noise\n`4` SYSTEM_ERROR → Slack (a silent failure in a compliance system is itself an incident)",
+        "height": 440,
+        "width": 520,
+        "color": 6
+      },
+      "id": "us-note-0021",
+      "name": "Note 0021",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -220
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "VALIDATE_Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VALIDATE_Input": {
+      "main": [
+        [
+          {
+            "node": "RESOLVE_CodeBasis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESOLVE_CodeBasis": {
+      "main": [
+        [
+          {
+            "node": "BUILD_Vision_Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BUILD_Vision_Payload": {
+      "main": [
+        [
+          {
+            "node": "Vision_Primary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision_Primary": {
+      "main": [
+        [
+          {
+            "node": "PARSE_And_Score",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Vision_Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision_Fallback": {
+      "main": [
+        [
+          {
+            "node": "PARSE_And_Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PARSE_And_Score": {
+      "main": [
+        [
+          {
+            "node": "SHAPE_DbRow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHAPE_DbRow": {
+      "main": [
+        [
+          {
+            "node": "LOG_Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LOG_Audit": {
+      "main": [
+        [
+          {
+            "node": "BUILD_Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BUILD_Report": {
+      "main": [
+        [
+          {
+            "node": "ROUTE_Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE_Outcome": {
+      "main": [
+        [
+          {
+            "node": "SEND_Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CREATE_WorkOrder",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SHAPE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SEND_Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SEND_Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SHAPE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SEND_Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SHAPE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SHAPE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SEND_Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "SHAPE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHAPE_Response": {
+      "main": [
+        [
+          {
+            "node": "Respond_to_Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SEND_Slack": {
+      "main": [
+        []
+      ]
+    },
+    "SEND_Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "SEND_Email": {
+      "main": [
+        []
+      ]
+    },
+    "CREATE_WorkOrder": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "headers": {
+            "content-type": "application/json"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "image_url": "https://6tm3ilznpjpkygcc.public.blob.vercel-storage.com/1782305889054-fire_extinguisher_bad.png",
+            "site_id": "SITE-CA-LAX-014",
+            "jurisdiction": "CA",
+            "occupancy_type": "MERCANTILE",
+            "equipment_hint": "PORTABLE_FIRE_EXTINGUISHER",
+            "inspector_id": "TECH-4471",
+            "asset_tag": "EXT-014-03",
+            "osha_workplace": true
+          },
+          "webhookUrl": "https://n8n.arvamisolutionz.com/webhook/audit-field-photo-us",
+          "executionMode": "test"
+        }
+      }
+    ]
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
