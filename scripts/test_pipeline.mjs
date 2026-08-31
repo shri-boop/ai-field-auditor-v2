@@ -16,21 +16,38 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NODES = join(HERE, 'nodes');
 
-function loadNode(file) {
+// Globals that the n8n Code node's restricted `vm` context does NOT reliably
+// provide. Shadowing them as undefined reproduces the production sandbox, which
+// is how the `new URL(...)` ReferenceError went undetected the first time.
+const ABSENT_IN_SANDBOX = ['URL', 'URLSearchParams', 'require', 'process',
+                           'fetch', 'Buffer', 'TextEncoder', 'structuredClone'];
+
+function loadNode(file, restricted) {
   const src = readFileSync(join(NODES, file), 'utf8');
   // Code-node sources are function bodies: they end in `return [...]`.
-  return new Function('$input', '$', '$env', src);
+  if (!restricted) {
+    return new Function('$input', '$', '$env', src);
+  }
+  const fn = new Function('$input', '$', '$env', ...ABSENT_IN_SANDBOX, src);
+  const blanks = ABSENT_IN_SANDBOX.map(() => undefined);
+  return (input, ref, env) => fn(input, ref, env, ...blanks);
 }
 
-const N = {
-  validate: loadNode('01_validate_input.js'),
-  codeBasis: loadNode('02_resolve_code_basis.js'),
-  payload: loadNode('03_build_vision_payload.js'),
-  score: loadNode('04_parse_and_score.js'),
-  dbRow: loadNode('05_shape_db_row.js'),
-  report: loadNode('06_build_report.js'),
-  response: loadNode('07_shape_response.js')
-};
+function makeNodes(restricted) {
+  return {
+    validate: loadNode('01_validate_input.js', restricted),
+    codeBasis: loadNode('02_resolve_code_basis.js', restricted),
+    payload: loadNode('03_build_vision_payload.js', restricted),
+    score: loadNode('04_parse_and_score.js', restricted),
+    dbRow: loadNode('05_shape_db_row.js', restricted),
+    report: loadNode('06_build_report.js', restricted),
+    response: loadNode('07_shape_response.js', restricted)
+  };
+}
+
+// Default to the RESTRICTED sandbox: tests should run under production
+// conditions, not friendlier ones.
+let N = makeNodes(true);
 
 const items = (arr) => ({
   first: () => arr[0],
@@ -50,6 +67,13 @@ function runPipeline(body, modelContent, opts = {}) {
 
   bag.Webhook = [{ json: { body } }];
   bag.VALIDATE_Input = N.validate(items(bag.Webhook), ref, env);
+
+  // Mirrors ROUTE_Validation: a rejected request short-circuits to HTTP 400 and
+  // never reaches the vision model.
+  if (bag.VALIDATE_Input[0].json.validation_ok !== true) {
+    return { rejected: bag.VALIDATE_Input[0].json, validated: bag.VALIDATE_Input[0].json };
+  }
+
   bag.RESOLVE_CodeBasis = N.codeBasis(items(bag.VALIDATE_Input), ref, env);
   bag.BUILD_Vision_Payload = N.payload(items(bag.RESOLVE_CodeBasis), ref, env);
 
@@ -115,29 +139,43 @@ const baseBody = {
 };
 
 const jsonOf = (o) => JSON.stringify(o);
+const cleanModelEarly = jsonOf({ equipment_type: 'PORTABLE_FIRE_EXTINGUISHER', confidence: 'HIGH',
+  image_quality: 'GOOD', observations: 'ok', deficiencies: [], unverifiable_items: [] });
 
 // ===========================================================================
-section('1. Input validation and SSRF hardening');
+section('1. Input validation and SSRF hardening (restricted sandbox)');
 
-try {
-  runPipeline({ ...baseBody, image_url: 'http://abc.public.blob.vercel-storage.com/x.png' }, '{}');
-  check('rejects plain http', false, 'no error thrown');
-} catch (e) {
-  check('rejects plain http', /must use https/.test(e.message), e.message);
+function rejectionOf(bodyOverrides) {
+  return runPipeline({ ...baseBody, ...bodyOverrides }, '{}').rejected;
 }
 
-try {
-  runPipeline({ ...baseBody, image_url: 'https://evil.example.com/x.png' }, '{}');
-  check('rejects non-allow-listed host', false, 'no error thrown');
-} catch (e) {
-  check('rejects non-allow-listed host', /not allow-listed/.test(e.message), e.message);
-}
+{
+  const r = rejectionOf({ image_url: 'http://abc.public.blob.vercel-storage.com/x.png' });
+  check('rejects plain http', r && r.validation_error_code === 'IMAGE_URL_NOT_HTTPS', r && r.validation_error_code);
 
-try {
-  runPipeline({ ...baseBody, image_url: '' }, '{}');
-  check('rejects missing image_url', false, 'no error thrown');
-} catch (e) {
-  check('rejects missing image_url', /image_url" is required/.test(e.message), e.message);
+  const h = rejectionOf({ image_url: 'https://evil.example.com/x.png' });
+  check('rejects non-allow-listed host', h && h.validation_error_code === 'IMAGE_HOST_NOT_ALLOWED', h && h.validation_error_code);
+
+  const m = rejectionOf({ image_url: '' });
+  check('rejects missing image_url', m && m.validation_error_code === 'IMAGE_URL_MISSING', m && m.validation_error_code);
+
+  const j = rejectionOf({ image_url: 'not-a-url-at-all' });
+  check('rejects malformed URL', j && j.validation_error_code === 'IMAGE_URL_MALFORMED', j && j.validation_error_code);
+
+  // Allow-list bypass via userinfo: the real host is after the "@".
+  const u = rejectionOf({ image_url: 'https://abc.public.blob.vercel-storage.com@evil.example/x.png' });
+  check('rejects credentials-in-URL allow-list bypass',
+    u && u.validation_error_code === 'IMAGE_URL_HAS_USERINFO', u && u.validation_error_code);
+
+  const ip = rejectionOf({ image_url: 'https://[::1]/x.png' });
+  check('rejects IPv6 literal host', ip && /IP_LITERAL|NOT_ALLOWED/.test(ip.validation_error_code), ip && ip.validation_error_code);
+
+  // Rejections must be actionable, not just a boolean.
+  check('rejection carries a human-readable reason',
+    typeof h.validation_error === 'string' && h.validation_error.includes('evil.example'), h.validation_error);
+  check('rejection echoes the offending value', typeof h.received_value === 'string' && h.received_value.length > 0);
+  check('rejection never reports a false cause for a valid URL',
+    !/not a valid absolute URL/.test(rejectionOf({ image_url: 'https://evil.example.com/x.png' }).validation_error));
 }
 
 {
@@ -147,10 +185,19 @@ try {
     observations: 'Clean unit.', deficiencies: [], unverifiable_items: [],
     impairment_suspected: false, impairment_basis: null
   }));
+  check('accepts a valid Vercel Blob URL without a URL global',
+    r.rejected === undefined && r.validated.validation_ok === true,
+    r.rejected ? r.rejected.validation_error : 'ok');
   check('site_id normalised to upper case', r.validated.site_id === 'SITE-CA-LAX-014', r.validated.site_id);
   check('audit_id minted with US prefix', /^FA-US-\d{8}-[0-9A-F]{8}-[0-9A-Z]{5}$/.test(r.validated.audit_id), r.validated.audit_id);
+  check('host extracted correctly without a URL parser',
+    r.validated.image_host === 'abc.public.blob.vercel-storage.com', r.validated.image_host);
   check('idempotency_key is stable for same input',
     r.validated.idempotency_key === runPipeline(baseBody, jsonOf({ deficiencies: [] })).validated.idempotency_key);
+
+  // A port and a query string must not break host extraction.
+  const q = runPipeline({ ...baseBody, image_url: GOOD_URL + '?v=2&x=1' }, cleanModelEarly);
+  check('tolerates query strings', q.rejected === undefined, q.rejected && q.rejected.validation_error);
 }
 
 // ===========================================================================
@@ -468,6 +515,68 @@ section('8. DB projection matches the migration (autoMapInputData contract)');
     produced.every((s) => allowed.includes(s)), produced.join(','));
   check('all five status values are reachable',
     new Set(produced).size === 5, [...new Set(produced)].join(','));
+}
+
+// ===========================================================================
+section('9. Sandbox safety + regression: the exact request that failed in n8n');
+
+{
+  // Static guard: no node may reference a global the Code node sandbox lacks.
+  const forbidden = /\bnew URL\s*\(|\bURLSearchParams\b|\brequire\s*\(|\bprocess\.|\bfetch\s*\(|\bBuffer\.|\bstructuredClone\s*\(/;
+  const offenders = [];
+  for (const f of ['01_validate_input.js', '02_resolve_code_basis.js', '03_build_vision_payload.js',
+                   '04_parse_and_score.js', '05_shape_db_row.js', '06_build_report.js',
+                   '07_shape_response.js']) {
+    const src = readFileSync(join(NODES, f), 'utf8');
+    // Strip comments so the explanatory notes about `new URL(...)` don't trip this.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    if (forbidden.test(code)) offenders.push(f);
+  }
+  check('no node references a sandbox-unavailable global', offenders.length === 0,
+    'offenders: ' + offenders.join(', '));
+
+  // Replay the workflow's own pinned webhook body — this is precisely the
+  // payload that produced "image_url is not a valid absolute URL" in n8n.
+  const wf = JSON.parse(readFileSync(join(HERE, '..', 'AI_Field_Audit_US.json'), 'utf8'));
+  const pinned = wf.pinData.Webhook[0].json.body;
+  check('pinned fixture still present in the built workflow', !!pinned.image_url);
+
+  const replay = runPipeline(pinned, jsonOf({
+    equipment_type: 'PORTABLE_FIRE_EXTINGUISHER',
+    equipment_subtype: 'ABC dry chemical stored pressure',
+    image_quality: 'FAIR', confidence: 'MEDIUM',
+    observations: 'Gauge needle appears below the green band; no legible service tag.',
+    deficiencies: [majorDef], unverifiable_items: ['Agent weight not verifiable.']
+  }));
+
+  check('REGRESSION: pinned request is no longer rejected',
+    replay.rejected === undefined,
+    replay.rejected ? replay.rejected.validation_error_code + ': ' + replay.rejected.validation_error : 'accepted');
+  check('REGRESSION: pinned request produces a complete audit',
+    replay.response && replay.response.status === 'NON-COMPLIANT', replay.response && replay.response.status);
+  check('REGRESSION: pinned jurisdiction (CA) resolved correctly',
+    replay.response.code_basis.jurisdiction_resolved === 'CA');
+  check('REGRESSION: response is valid JSON-serialisable',
+    typeof JSON.stringify(replay.response) === 'string');
+
+  // The workflow must expose exactly two responder nodes: 200 and 400.
+  const responders = wf.nodes.filter((n) => n.type === 'n8n-nodes-base.respondToWebhook');
+  check('workflow has both a 200 and a 400 responder', responders.length === 2, 'found ' + responders.length);
+  const codes = responders.map((n) => n.parameters.options.responseCode).sort();
+  check('responder status codes are 200 and 400', codes.join(',') === '200,400', codes.join(','));
+
+  // Validation routing must exist and be wired to the 400 responder.
+  const valRoute = wf.connections.ROUTE_Validation;
+  check('ROUTE_Validation wired: valid -> RESOLVE_CodeBasis',
+    valRoute.main[0][0].node === 'RESOLVE_CodeBasis');
+  check('ROUTE_Validation wired: rejected -> RESPOND_BadRequest',
+    valRoute.main[1][0].node === 'RESPOND_BadRequest');
+
+  // No duplicate ids/names (the build asserts this, verify the artifact too).
+  const ids = wf.nodes.map((n) => n.id);
+  const nms = wf.nodes.map((n) => n.name);
+  check('built workflow has unique node ids', new Set(ids).size === ids.length);
+  check('built workflow has unique node names', new Set(nms).size === nms.length);
 }
 
 // ===========================================================================

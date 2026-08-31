@@ -83,10 +83,46 @@ def build():
     # ------------------------------------------------------- validate + resolve
     nodes.append(code_node("us-validate-0002", "VALIDATE_Input",
                            "01_validate_input.js", [-2380, 400]))
-    nodes.append(code_node("us-codebasis-0003", "RESOLVE_CodeBasis",
-                           "02_resolve_code_basis.js", [-2160, 400]))
-    nodes.append(code_node("us-payload-0004", "BUILD_Vision_Payload",
-                           "03_build_vision_payload.js", [-1940, 400]))
+
+    # Rejected requests must get a real HTTP 400 with a reason. Throwing inside
+    # VALIDATE_Input aborts the run before Respond_to_Webhook, leaving the caller
+    # with an empty body and no diagnosis. Rejecting here also means malformed
+    # input never reaches the vision model, so it costs nothing.
+    nodes.append({
+        "parameters": {
+            "mode": "expression",
+            "numberOutputs": 2,
+            "output": "={{ $json.validation_ok ? 0 : 1 }}",
+            "options": {},
+        },
+        "id": "us-routeval-0003",
+        "name": "ROUTE_Validation",
+        "type": "n8n-nodes-base.switch",
+        "typeVersion": 3.2,
+        "position": [-2180, 400],
+    })
+
+    nodes.append({
+        "parameters": {
+            "respondWith": "json",
+            "responseBody": "={{ JSON.stringify({ status: 'REJECTED', "
+                            "error_code: $json.validation_error_code, "
+                            "error: $json.validation_error, "
+                            "received_value: $json.received_value, "
+                            "advisory_only: true }) }}",
+            "options": {"responseCode": 400},
+        },
+        "id": "us-respond400-0004",
+        "name": "RESPOND_BadRequest",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [-2180, 640],
+    })
+
+    nodes.append(code_node("us-codebasis-0031", "RESOLVE_CodeBasis",
+                           "02_resolve_code_basis.js", [-1960, 400]))
+    nodes.append(code_node("us-payload-0032", "BUILD_Vision_Payload",
+                           "03_build_vision_payload.js", [-1740, 400]))
 
     # -------------------------------------------------------------- vision call
     nodes.append({
@@ -105,7 +141,7 @@ def build():
         "name": "Vision_Primary",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4,
-        "position": [-1700, 400],
+        "position": [-1520, 400],
         "credentials": CRED_OPENROUTER,
         "retryOnFail": True,
         "maxTries": 3,
@@ -132,7 +168,7 @@ def build():
         "name": "Vision_Fallback",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4,
-        "position": [-1700, 660],
+        "position": [-1520, 660],
         "credentials": CRED_OPENROUTER,
         "retryOnFail": True,
         "maxTries": 2,
@@ -142,9 +178,9 @@ def build():
 
     # ----------------------------------------------------- score + persist
     nodes.append(code_node("us-score-0007", "PARSE_And_Score",
-                           "04_parse_and_score.js", [-1440, 400]))
+                           "04_parse_and_score.js", [-1280, 400]))
     nodes.append(code_node("us-dbrow-0008", "SHAPE_DbRow",
-                           "05_shape_db_row.js", [-1220, 400]))
+                           "05_shape_db_row.js", [-1060, 400]))
 
     nodes.append({
         "parameters": {
@@ -166,7 +202,7 @@ def build():
         "name": "LOG_Audit",
         "type": "n8n-nodes-base.postgres",
         "typeVersion": 2.6,
-        "position": [-1000, 400],
+        "position": [-840, 400],
         "credentials": CRED_POSTGRES,
         "retryOnFail": True,
         "maxTries": 3,
@@ -179,7 +215,7 @@ def build():
 
     # ------------------------------------------------------- report + routing
     nodes.append(code_node("us-report-0010", "BUILD_Report",
-                           "06_build_report.js", [-780, 400]))
+                           "06_build_report.js", [-620, 400]))
 
     nodes.append({
         "parameters": {
@@ -193,7 +229,7 @@ def build():
         "name": "ROUTE_Outcome",
         "type": "n8n-nodes-base.switch",
         "typeVersion": 3.2,
-        "position": [-560, 400],
+        "position": [-400, 400],
     })
 
     # ------------------------------------------------------------- notifiers
@@ -208,7 +244,7 @@ def build():
         "name": "SEND_Slack",
         "type": "n8n-nodes-base.slack",
         "typeVersion": 2.4,
-        "position": [-300, 60],
+        "position": [-140, 60],
         "credentials": CRED_SLACK,
         "onError": "continueRegularOutput",
         "retryOnFail": True,
@@ -225,7 +261,7 @@ def build():
         "name": "SEND_Telegram",
         "type": "n8n-nodes-base.telegram",
         "typeVersion": 1.2,
-        "position": [-300, 260],
+        "position": [-140, 260],
         "credentials": CRED_TELEGRAM,
         "onError": "continueRegularOutput",
         "retryOnFail": True,
@@ -244,7 +280,7 @@ def build():
         "name": "SEND_Email",
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.2,
-        "position": [-300, 470],
+        "position": [-140, 470],
         "credentials": CRED_GMAIL,
         "onError": "continueRegularOutput",
         # Disabled by default, mirroring the India workflow. Enable once the
@@ -272,14 +308,14 @@ def build():
         "name": "CREATE_WorkOrder",
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4,
-        "position": [-300, 680],
+        "position": [-140, 680],
         "onError": "continueRegularOutput",
         "disabled": True,
     })
 
     # ------------------------------------------------------------- respond
     nodes.append(code_node("us-respshape-0016", "SHAPE_Response",
-                           "07_shape_response.js", [-40, 400]))
+                           "07_shape_response.js", [120, 400]))
 
     nodes.append({
         "parameters": {
@@ -291,7 +327,7 @@ def build():
         "name": "Respond_to_Webhook",
         "type": "n8n-nodes-base.respondToWebhook",
         "typeVersion": 1,
-        "position": [200, 400],
+        "position": [340, 400],
     })
 
     # ------------------------------------------------------------- documentation
@@ -358,7 +394,14 @@ def build():
 
     connections = {
         "Webhook": {"main": main("VALIDATE_Input")},
-        "VALIDATE_Input": {"main": main("RESOLVE_CodeBasis")},
+        "VALIDATE_Input": {"main": main("ROUTE_Validation")},
+        # 0 = valid -> continue; 1 = rejected -> HTTP 400
+        "ROUTE_Validation": {
+            "main": [
+                [{"node": "RESOLVE_CodeBasis", "type": "main", "index": 0}],
+                [{"node": "RESPOND_BadRequest", "type": "main", "index": 0}],
+            ]
+        },
         "RESOLVE_CodeBasis": {"main": main("BUILD_Vision_Payload")},
         "BUILD_Vision_Payload": {"main": main("Vision_Primary")},
         # output 0 = success, output 1 = error -> fallback model
@@ -413,6 +456,40 @@ def build():
         "CREATE_WorkOrder": {"main": [[]]},
     }
 
+    # --------------------------------------------------------------- assertions
+    # n8n silently misbehaves on duplicate node ids, and duplicate names break
+    # $('NodeName') lookups. Both are easy to introduce when inserting a node
+    # mid-pipeline, so fail the build instead of shipping it.
+    ids = [n["id"] for n in nodes]
+    names = [n["name"] for n in nodes]
+    dup_ids = sorted({i for i in ids if ids.count(i) > 1})
+    dup_names = sorted({n for n in names if names.count(n) > 1})
+    if dup_ids:
+        raise SystemExit("BUILD FAILED: duplicate node ids: " + ", ".join(dup_ids))
+    if dup_names:
+        raise SystemExit("BUILD FAILED: duplicate node names: " + ", ".join(dup_names))
+
+    # Overlapping canvas positions make the imported workflow unreadable.
+    coords = {}
+    for n in nodes:
+        if n["type"] == "n8n-nodes-base.stickyNote":
+            continue
+        key = tuple(n["position"])
+        if key in coords:
+            raise SystemExit("BUILD FAILED: nodes overlap at %s: %s and %s"
+                             % (key, coords[key], n["name"]))
+        coords[key] = n["name"]
+
+    # Every referenced node must exist, and every node must be reachable.
+    known = set(names)
+    for src, conn in connections.items():
+        if src not in known:
+            raise SystemExit("BUILD FAILED: connection from unknown node: " + src)
+        for output in conn["main"]:
+            for link in output:
+                if link["node"] not in known:
+                    raise SystemExit("BUILD FAILED: connection to unknown node: " + link["node"])
+
     workflow = {
         "name": "AI_Field_Audit_US_NFPA_IFC",
         "nodes": nodes,
@@ -437,7 +514,7 @@ def build():
                             "asset_tag": "EXT-014-03",
                             "osha_workplace": True,
                         },
-                        "webhookUrl": "https://n8n.arvamisolutionz.com/webhook/" + WEBHOOK_PATH,
+                        "webhookUrl": "https://n8n.kratuailabs.com/webhook/" + WEBHOOK_PATH,
                         "executionMode": "test",
                     }
                 }

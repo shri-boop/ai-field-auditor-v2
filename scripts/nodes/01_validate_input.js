@@ -3,11 +3,36 @@
  * Mode: Run Once for All Items
  *
  * Responsibilities:
- *   - Hard schema validation of the inbound webhook body (fail fast, fail loud).
- *   - SSRF hardening: the image URL is attacker-controllable and is later
+ *   - Hard schema validation of the inbound webhook body.
+ *   - SSRF hardening: the image URL is caller-controllable and is later
  *     dereferenced by a third party (OpenRouter), so restrict scheme + host.
- *   - Mint a stable audit_id and an idempotency_key so repeated submissions of
- *     the same photo for the same site collapse to one logical audit.
+ *   - Mint a stable audit_id and an idempotency_key.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THERE IS NO `new URL(...)` HERE
+ * ---------------------------------------------------------------------------
+ * The n8n Code node executes inside a restricted `vm` context (the task
+ * runner). Standard web globals are NOT guaranteed to exist there, and
+ * `new URL(...)` throws a ReferenceError on this deployment.
+ *
+ * The original implementation wrapped it in `try { new URL(x) } catch { throw
+ * 'not a valid absolute URL' }`. That catch block conflated two completely
+ * different failures — "the caller sent bad input" and "my code cannot run in
+ * this environment" — and reported the wrong one, sending the operator off to
+ * debug a URL that was perfectly valid.
+ *
+ * Lesson applied below: parse with a regex (no global dependency), and never
+ * let a catch block report an input error for what is actually an environment
+ * or programming error.
+ * ---------------------------------------------------------------------------
+ *
+ * FAILURE MODE
+ * This node does not throw for caller mistakes. Throwing aborts the execution
+ * before Respond_to_Webhook is reached, so the HTTP caller receives an empty
+ * body and has no idea what was wrong. Instead it emits
+ * `validation_ok: false` plus a structured error, and ROUTE_Validation returns
+ * a proper HTTP 400. Cheap side benefit: a rejected request never reaches the
+ * vision model, so malformed input costs nothing.
  *
  * Contract (POST body):
  *   image_url        (required) https URL on an allow-listed object store
@@ -22,25 +47,62 @@
 
 const body = $input.first().json.body || {};
 
+// Structured rejection -> HTTP 400 via ROUTE_Validation.
+function reject(code, message, received) {
+  return [{
+    json: {
+      validation_ok: false,
+      validation_error_code: code,
+      validation_error: message,
+      received_value: received === undefined ? null : String(received).slice(0, 200),
+      rejected_at: new Date().toISOString()
+    }
+  }];
+}
+
 // ---------------------------------------------------------------- image_url
 const image_url = String(body.image_url || '').trim();
 if (!image_url) {
-  throw new Error('VALIDATION: "image_url" is required and was empty.');
+  return reject('IMAGE_URL_MISSING', '"image_url" is required and was empty.', body.image_url);
 }
 
-let parsed;
-try {
-  parsed = new URL(image_url);
-} catch (e) {
-  throw new Error('VALIDATION: "image_url" is not a valid absolute URL.');
+// Absolute-URI shape: scheme "://" authority [ path/query/fragment ]
+// Deliberately regex-based; see the header note above.
+const ABSOLUTE_URL_RE = /^([A-Za-z][A-Za-z0-9+.\-]*):\/\/([^/?#\s]+)([/?#][^\s]*)?$/;
+const match = image_url.match(ABSOLUTE_URL_RE);
+if (!match) {
+  return reject(
+    'IMAGE_URL_MALFORMED',
+    '"image_url" is not a valid absolute URL. Expected the form https://host/path.',
+    image_url
+  );
 }
 
-if (parsed.protocol !== 'https:') {
-  throw new Error('VALIDATION: "image_url" must use https (got ' + parsed.protocol + ').');
+const scheme = match[1].toLowerCase();
+const authority = match[2];
+
+if (scheme !== 'https') {
+  return reject('IMAGE_URL_NOT_HTTPS', '"image_url" must use https (received scheme "' + scheme + '").', image_url);
 }
 
-// Allow-list of object-store hosts we are willing to hand to the vision provider.
-// Entries beginning with "." are treated as suffix matches on the hostname.
+// Embedded credentials are a classic allow-list bypass: a naive check on
+// "https://trusted-host.com@evil.example/x" reads the wrong host entirely.
+if (authority.indexOf('@') !== -1) {
+  return reject('IMAGE_URL_HAS_USERINFO', '"image_url" must not contain credentials or an "@" in the host.', image_url);
+}
+
+// Strip a trailing :port. Bracketed IPv6 literals are refused outright.
+const host = authority.replace(/:\d+$/, '').toLowerCase();
+
+if (!host) {
+  return reject('IMAGE_URL_NO_HOST', '"image_url" has no host component.', image_url);
+}
+if (host.charAt(0) === '[') {
+  return reject('IMAGE_URL_IP_LITERAL', 'IPv6 literal image hosts are not permitted.', image_url);
+}
+
+// Allow-list of object-store hosts we are willing to hand to the vision
+// provider. Entries beginning with "." are suffix matches on the hostname.
 const ALLOWED_IMAGE_HOSTS = [
   '.public.blob.vercel-storage.com',
   '.s3.amazonaws.com',
@@ -50,18 +112,21 @@ const ALLOWED_IMAGE_HOSTS = [
   'storage.googleapis.com'
 ];
 
-const host = parsed.hostname.toLowerCase();
 const hostAllowed = ALLOWED_IMAGE_HOSTS.some(function (entry) {
   return entry.charAt(0) === '.' ? host.endsWith(entry) : host === entry;
 });
 if (!hostAllowed) {
-  throw new Error('VALIDATION: image host is not allow-listed: ' + host);
+  return reject(
+    'IMAGE_HOST_NOT_ALLOWED',
+    'Image host is not allow-listed: ' + host + '. Add it to ALLOWED_IMAGE_HOSTS in VALIDATE_Input if this is intentional.',
+    image_url
+  );
 }
 
 // Defence in depth: refuse loopback / link-local / RFC1918 literals outright.
-const PRIVATE_LITERAL = /^(localhost|0\.0\.0\.0|127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[?::1\]?)/;
+const PRIVATE_LITERAL = /^(localhost|0\.0\.0\.0|127\.|10\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/;
 if (PRIVATE_LITERAL.test(host)) {
-  throw new Error('VALIDATION: private, loopback or link-local image hosts are not permitted.');
+  return reject('IMAGE_HOST_PRIVATE', 'Private, loopback or link-local image hosts are not permitted.', image_url);
 }
 
 // ------------------------------------------------------------ site metadata
@@ -82,7 +147,7 @@ const asset_tag = clean(body.asset_tag, '', 64);
 const osha_workplace = body.osha_workplace !== false;
 
 // ------------------------------------------------- identity + idempotency
-// FNV-1a: no crypto module needed (n8n sandboxes builtins by default).
+// FNV-1a: no crypto module needed (the Code node sandboxes builtins).
 function fnv1a(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -104,6 +169,7 @@ const audit_id =
 
 return [{
   json: {
+    validation_ok: true,
     audit_id: audit_id,
     idempotency_key: idempotency_key,
     received_at: received_at,
