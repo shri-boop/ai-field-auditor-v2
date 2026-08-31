@@ -2,6 +2,19 @@
 
 This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
 
+## n8n audit workflows
+
+| File | Region | Code basis | Webhook |
+|---|---|---|---|
+| `AI_Field_Audit_v2.json` | India | NBC 2016 + CFO Mumbai | `/webhook/audit-field-photov2` |
+| `AI_Field_Audit_US.json` | United States | IFC 2024 / NFPA 1 + NFPA 10, 25, 72, 80, 96, 101, 110, with an OSHA 29 CFR 1910 overlay — resolved per jurisdiction at runtime | `/webhook/audit-field-photo-us` |
+
+The US workflow is a **build artifact**. Its logic lives in `scripts/nodes/*.js`;
+regenerate with `python3 scripts/build_us_workflow.py` and test offline with
+`node scripts/test_pipeline.mjs`. See
+**[docs/US_FIRE_AUDIT_WORKFLOW.md](docs/US_FIRE_AUDIT_WORKFLOW.md)** for the
+architecture, API contract, database migration and known limitations.
+
 ## Built with v0
 
 This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
