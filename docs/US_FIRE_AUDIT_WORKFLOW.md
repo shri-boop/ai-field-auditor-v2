@@ -46,7 +46,10 @@ routinely override state defaults.
 ```
 Webhook
   └─ VALIDATE_Input        schema + SSRF guard, mint audit_id / idempotency_key
-      └─ RESOLVE_CodeBasis jurisdiction → fire code, edition, AHJ, OSHA overlay, timezone
+      └─ ROUTE_Validation
+           ├─ rejected → RESPOND_BadRequest (HTTP 400, structured reason, no model call)
+           └─ ok ↓
+          RESOLVE_CodeBasis  jurisdiction → fire code, edition, AHJ, OSHA overlay, timezone
           └─ BUILD_Vision_Payload   render prompt from code basis + checklist registry
               └─ Vision_Primary     Claude Sonnet 4.5, 120 s timeout, 3 retries
                    ├─ ok ──────────────────┐
@@ -84,14 +87,32 @@ Webhook
 | 12 | Implies a compliance verdict | `advisory_only`, `certification_eligible: false`, `signoff_status`, `unverifiable_items` | A photograph cannot certify compliance. Florida statutorily reserves firesafety inspections to inspectors certified under s. 633.216, F.S. |
 | 13 | Full `$json` returned (incl. email HTML) | Curated response contract | Smaller payload, explicit API surface. |
 
-### A bug this work surfaced
+### Bugs this work surfaced
 
-`toLocaleString` **throws** when `dateStyle`/`timeStyle` are combined with
-`timeZoneName` — it is a spec violation, not an environment quirk. The first
-implementation did exactly that, and the `try/catch` silently degraded every
-notification timestamp to a raw UTC ISO string. Caught by
-`scripts/test_pipeline.mjs`, not by inspection. Explicit component options are
-required to render `PDT` / `EDT` / `MST`.
+**1. `toLocaleString` and `timeZoneName`.** Combining `dateStyle`/`timeStyle`
+with `timeZoneName` throws — a spec violation, not an environment quirk. The
+first implementation did exactly that, and the `try/catch` silently degraded
+every notification timestamp to a raw UTC ISO string. Explicit component options
+are required to render `PDT` / `EDT` / `MST`.
+
+**2. `new URL(...)` is not available in the n8n Code node.** The Code node runs
+in a restricted `vm` context (the task runner) where web globals are not
+guaranteed. `new URL(...)` threw a `ReferenceError`, and because it was wrapped
+in `try { … } catch { throw 'not a valid absolute URL' }`, **a broken sandbox
+looked exactly like bad caller input** — the reported cause pointed at a URL that
+was completely valid.
+
+Two rules came out of that, both now enforced by tests:
+
+- Never let a `catch` block conflate "the input is wrong" with "my code cannot
+  run here". Distinguish the cases and name them (`IMAGE_URL_MALFORMED` vs a
+  genuine runtime failure).
+- **Run the test suite under the restricted sandbox, not a friendlier one.**
+  `scripts/test_pipeline.mjs` now shadows `URL`, `require`, `process`, `fetch`,
+  `Buffer` and friends as `undefined` by default, plus a static grep that fails
+  the suite if any node references them. The original suite passed 85/85 while
+  the workflow was broken in production, purely because Node provides `URL`
+  globally and n8n does not.
 
 ---
 
@@ -240,6 +261,25 @@ Backward compatible with the existing dashboard — `status`, `confidence`,
 }
 ```
 
+### Rejected requests (HTTP 400)
+
+Validation failures return a structured body instead of an empty one, and never
+reach the vision model — so malformed input costs nothing:
+
+```json
+{
+  "status": "REJECTED",
+  "error_code": "IMAGE_HOST_NOT_ALLOWED",
+  "error": "Image host is not allow-listed: evil.example.com. Add it to ALLOWED_IMAGE_HOSTS in VALIDATE_Input if this is intentional.",
+  "received_value": "https://evil.example.com/x.png",
+  "advisory_only": true
+}
+```
+
+Codes: `IMAGE_URL_MISSING`, `IMAGE_URL_MALFORMED`, `IMAGE_URL_NOT_HTTPS`,
+`IMAGE_URL_HAS_USERINFO`, `IMAGE_URL_NO_HOST`, `IMAGE_URL_IP_LITERAL`,
+`IMAGE_HOST_NOT_ALLOWED`, `IMAGE_HOST_PRIVATE`.
+
 ### Status values
 
 | `status` | `route_index` | Meaning |
@@ -261,7 +301,7 @@ Backward compatible with the existing dashboard — `status`, `confidence`,
 # Syntax check
 for f in scripts/nodes/*.js; do node --check "$f"; done
 
-# Run the 85-assertion offline test suite (no n8n, DB or model needed)
+# Run the 106-assertion offline test suite (no n8n, DB or model needed)
 node scripts/test_pipeline.mjs
 
 # Regenerate the importable workflow
@@ -274,9 +314,12 @@ python3 scripts/build_us_workflow.py --check
 `AI_Field_Audit_US.json` is a **build artifact**. Edit `scripts/nodes/*.js` and
 regenerate; do not hand-edit the JSON, or the next build will overwrite you.
 
-The test harness loads each Code node with `new Function('$input','$','$env', src)`
-and chains them with mocked model responses, so verdict logic, JSON repair,
-escaping, timezones and the DB projection are all covered offline.
+The harness loads each Code node with `new Function(...)` and chains them with
+mocked model responses, so verdict logic, JSON repair, escaping, timezones and
+the DB projection are all covered offline. It runs in the **restricted sandbox by
+default** — `URL`, `require`, `process`, `fetch` and `Buffer` are shadowed as
+`undefined` to match the n8n Code node — and replays the workflow's own pinned
+fixture as a regression test.
 
 ---
 
@@ -286,7 +329,7 @@ escaping, timezones and the DB projection are all covered offline.
 US workflow is response-compatible, so the minimum change is the URL:
 
 ```ts
-const WEBHOOK_URL = 'https://n8n.arvamisolutionz.com/webhook/audit-field-photo-us';
+const WEBHOOK_URL = 'https://n8n.kratuailabs.com/webhook/audit-field-photo-us';
 ```
 
 To make it genuinely useful, add:
