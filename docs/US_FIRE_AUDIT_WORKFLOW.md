@@ -323,30 +323,56 @@ fixture as a regression test.
 
 ---
 
-## 8. Frontend wiring (not yet done)
+## 8. Frontend wiring
 
-`app/page.tsx` still points at the India webhook and hardcodes NBC 2016 copy. The
-US workflow is response-compatible, so the minimum change is the URL:
+Done. The dashboard serves both regions from one codebase, scoped per
+deployment by `ENABLED_REGIONS` (see the README). Relevant files:
 
-```ts
-const WEBHOOK_URL = 'https://n8n.kratuailabs.com/webhook/audit-field-photo-us';
-```
+| File | Role |
+|---|---|
+| `lib/regions.ts` | Region registry: webhook path, US option lists, `parseEnabledRegions` |
+| `app/api/audit/route.ts` | Server-side proxy. **Enforces** the region allow-list; holds `N8N_BASE_URL` |
+| `app/page.tsx` | Server component; resolves enabled regions |
+| `components/audit-console.tsx` | Client UI: region switch, US inputs, results |
 
-To make it genuinely useful, add:
+What the UI now does with the US response:
 
-1. A **jurisdiction selector** (`CA`, `FL`, `TX`, `NY-NYC`, …) posted as `jurisdiction`.
-2. Replace the two hardcoded NBC strings — `"Running NBC 2016 compliance checks"`
-   and `"Equipment meets all NBC 2016 and CFO Mumbai norms"` — with
-   `code_basis.fire_code` from the response.
-3. Render `deficiencies[]` (severity badge + citation + remediation) instead of
-   flat `violations[]` strings.
-4. Surface `advisory_only` / `signoff_status` so no one mistakes the screen for a
-   certified inspection.
-5. Show `unverifiable_items` — it is the honest boundary of the automated pass.
-6. Use `local_timestamp` rather than re-formatting with `en-IN`.
+1. **Jurisdiction selector** (`CA`, `FL`, `TX`, `NY-NYC`, …) plus `occupancy_type`,
+   `equipment_hint` and the `osha_workplace` toggle, posted through the proxy.
+2. The two hardcoded NBC strings are gone — the status header and the clean-result
+   panel both read `code_basis.fire_code`, falling back to region copy only when
+   the response carries no code basis (i.e. India).
+3. `deficiencies[]` render sorted CRITICAL → MAJOR → MINOR with severity badge,
+   observed, requirement, remediation and `code_reference`, followed by a standing
+   caveat that clause numbers are model-generated pointers. Flat `violations[]`
+   still render for India, and as a fallback if `deficiencies` is empty.
+4. `advisory_only` and `signoff_status` show as a banner, with `scope_note`.
+5. `unverifiable_items` render under an explicit "cannot be verified from a
+   photograph" heading.
+6. `local_timestamp` is preferred; `audit_timestamp` is only re-formatted (per
+   region locale) when it is absent.
+7. `code_basis_confident: false` raises a visible warning that the model-code
+   baseline was applied and the AHJ must confirm.
+8. `impairment_notice`, `reinspect_reasons`, `risk_score`, `severity_counts`,
+   `sla_hours`, `audit_id`, `model_used` and `persisted: false` are all surfaced.
 
-Left out of this change deliberately: the repo is v0-linked and v0 pushes commits
-to `main` directly, so unrequested UI edits risk collision.
+Two implementation notes worth keeping:
+
+- **The proxy introduced an execution limit that did not exist before.** When the
+  browser called n8n directly there was no ceiling; a Vercel function has one.
+  Observed audits run 11–13 s, but `Vision_Primary` alone allows 120 s plus
+  retries plus a fallback model. `route.ts` sets `maxDuration = 300` (Vercel
+  clamps to the plan limit — Hobby caps at 60 s) and returns a structured 504
+  rather than letting the platform time out opaquely.
+- **shadcn's `SelectItem` puts all children inside Radix's `ItemText`**, and Radix
+  mirrors `ItemText` into the closed trigger. Two-line items therefore render both
+  lines stacked inside the trigger. The jurisdiction and equipment hints are
+  rendered as helper text beneath the select instead — which also keeps them
+  visible while the list is closed, when they actually matter ("Florida is
+  NFPA-based, not IFC").
+
+Still not built: the sign-off UI. `signoff_status` is displayed but read-only;
+the columns exist (`signoff_by`, `signoff_at`) and no interface writes them.
 
 ---
 
@@ -364,7 +390,15 @@ to `main` directly, so unrequested UI edits risk collision.
   but unverified. They are pointers for a human reviewer, not authority. This is
   why sign-off is mandatory.
 - **No sign-off UI.** The schema and columns exist (`signoff_status`,
-  `signoff_by`, `signoff_at`); the interface does not.
+  `signoff_by`, `signoff_at`); the dashboard displays the status read-only and
+  nothing writes it.
+- **Region gating is deployment scoping, not authentication.** `ENABLED_REGIONS`
+  keeps an India customer off the US workflow because they are served by a
+  different Vercel project. It does not identify *who* is using a deployment.
+  Anyone with the URL can run an audit. Add customer login before there is more
+  than one account per region.
+- **No frontend rate limiting.** `/api/upload` accepts any image and `/api/audit`
+  will forward it, so an unauthenticated caller can spend model credits.
 - **SQL is unverified against a live server** — no Postgres was available in the
   authoring environment. It is reviewed and column-consistency is enforced by
   test, but run it against staging first.

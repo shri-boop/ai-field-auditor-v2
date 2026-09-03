@@ -15,6 +15,50 @@ regenerate with `python3 scripts/build_us_workflow.py` and test offline with
 **[docs/US_FIRE_AUDIT_WORKFLOW.md](docs/US_FIRE_AUDIT_WORKFLOW.md)** for the
 architecture, API contract, database migration and known limitations.
 
+## Configuration
+
+Both variables are server-side only — neither is `NEXT_PUBLIC_`, so the n8n
+hostname no longer ships in the browser bundle. See
+[`.env.example`](.env.example).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `N8N_BASE_URL` | `https://n8n.kratuailabs.com` | n8n origin. The per-region webhook path is appended by `app/api/audit/route.ts`. |
+| `ENABLED_REGIONS` | `IND` | Which regions this deployment may serve: `IND`, `US`, or `IND,US`. |
+| `AUDIT_TIMEOUT_MS` | `240000` | How long the proxy waits on n8n before returning HTTP 504. |
+
+### Region gating
+
+One codebase serves both regions, but **each customer deployment is scoped to
+its own region** via `ENABLED_REGIONS`. Two Vercel projects can point at this
+same repo with different values and different domains:
+
+```
+ENABLED_REGIONS=IND      India customer   — no US surface rendered or callable
+ENABLED_REGIONS=US       US customer      — no India surface rendered or callable
+ENABLED_REGIONS=IND,US   internal / demo  — region switch visible
+```
+
+Enforcement is server-side. `app/api/audit/route.ts` rejects any region outside
+the allow-list with HTTP 403, so hiding the toggle is not what keeps regions
+apart — the route is. **Unset fails closed to `IND`**, so a misconfigured
+deployment can never accidentally expose the US workflow.
+
+This is deployment scoping, not authentication. Add customer login before
+there is more than one account per region.
+
+## Request flow
+
+```
+browser ──> POST /api/upload  ──> Vercel Blob            (public https URL)
+        └─> POST /api/audit   ──> region allow-list check (403 if not enabled)
+                               └─> $N8N_BASE_URL/webhook/<region path>
+```
+
+The browser no longer talks to n8n directly, which means the audit is
+same-origin (no dependence on n8n's CORS config), the n8n host is an env var
+rather than a code constant, and there is one server-side place to add auth.
+
 ## Built with v0
 
 This repository is linked to a [v0](https://v0.app) project. You can continue developing by visiting the link below -- start new chats to make changes, and v0 will push commits directly to this repo. Every merge to `main` will automatically deploy.
