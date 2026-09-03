@@ -26,6 +26,38 @@ hostname no longer ships in the browser bundle. See
 | `N8N_BASE_URL` | `https://n8n.kratuailabs.com` | n8n origin. The per-region webhook path is appended by `app/api/audit/route.ts`. |
 | `ENABLED_REGIONS` | `IND` | Which regions this deployment may serve: `IND`, `US`, or `IND,US`. |
 | `AUDIT_TIMEOUT_MS` | `240000` | How long the proxy waits on n8n before returning HTTP 504. |
+| `AUDIT_ACCESS_USER` | — | Basic-auth username. See Access control below. |
+| `AUDIT_ACCESS_PASSWORD` | — | Basic-auth password. Both must be set for auth to apply. |
+
+### Access control
+
+`middleware.ts` gates the page **and** the API routes behind HTTP Basic auth.
+Every audit is a paid vision call, so an open URL is a metered spend endpoint —
+and you cannot hand an open URL to a customer.
+
+It is **opt-in**: with either variable missing the middleware is inert, so
+deploying it cannot lock you out. Protection starts the moment both are set in
+Vercel, with no code change. Set them per deployment so each customer has its
+own credential.
+
+```bash
+openssl rand -base64 32     # AUDIT_ACCESS_PASSWORD
+```
+
+What this is not: one shared credential, no logout, no per-user attribution. It
+closes the spend hole and gates the URL. Real accounts arrive with sign-off,
+which legally needs to name a person.
+
+### Type checking
+
+The Next build does **not** type-check — `next.config.mjs` sets
+`typescript.ignoreBuildErrors` because `components/ui/*` carries pre-existing
+implicit-any errors from the v0 scaffold. A green deploy is therefore not a type
+gate. Run it explicitly:
+
+```bash
+npm run typecheck
+```
 
 ### Region gating
 

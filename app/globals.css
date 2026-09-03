@@ -3,85 +3,99 @@
 
 @custom-variant dark (&:is(.dark *));
 
-@import 'tailwindcss';
-@import 'tw-animate-css';
+/* ---------------------------------------------------------------------------
+   KRATU AI Labs design tokens.
 
-@custom-variant dark (&:is(.dark *));
+   Mirrors blog/branding/assets/kratu-blog.css in the agentic-dev-stack repo so
+   this dashboard, blog.kratuailabs.com and outbound email share one identity.
+   Do not fork these values locally — change them there and copy across.
+
+   Three colour roles, deliberately kept separate so nothing is ambiguous:
+
+     GOLD    structure only — hairlines, eyebrow labels, the wordmark. Never a
+             filled control, so it can never be mistaken for a status.
+     ACTION  one bright orange, reserved for "do this": the audit button and the
+             active region tab. Nothing else may use it.
+     VERDICT jade / amber / crimson, desaturated to sit inside the ink world.
+             Green-means-pass is close to sacred in life-safety work, so status
+             keeps conventional hues rather than inheriting the brand accent.
+   --------------------------------------------------------------------------- */
 
 :root {
-  --background: oklch(0.05 0 0);
-  --foreground: oklch(1 0 0);
-  --card: oklch(0.15 0 0);
-  --card-foreground: oklch(1 0 0);
-  --popover: oklch(0.15 0 0);
-  --popover-foreground: oklch(1 0 0);
-  --primary: oklch(0.6 0.2 41);
-  --primary-foreground: oklch(0 0 0);
-  --secondary: oklch(0.15 0 0);
-  --secondary-foreground: oklch(1 0 0);
-  --muted: oklch(0.4 0 0);
-  --muted-foreground: oklch(0.6 0 0);
-  --accent: oklch(0.6 0.2 29);
-  --accent-foreground: oklch(1 0 0);
-  --destructive: oklch(0.5 0.2 15);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.25 0 0);
-  --input: oklch(0.15 0 0);
-  --ring: oklch(0.6 0.2 29);
-  --chart-1: oklch(0.6 0.2 41);
-  --chart-2: oklch(0.7 0.15 200);
-  --chart-3: oklch(0.5 0.1 300);
-  --chart-4: oklch(0.6 0.2 29);
-  --chart-5: oklch(0.55 0.18 50);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.1 0 0);
-  --sidebar-foreground: oklch(1 0 0);
-  --sidebar-primary: oklch(0.6 0.2 41);
-  --sidebar-primary-foreground: oklch(0 0 0);
-  --sidebar-accent: oklch(0.6 0.2 29);
-  --sidebar-accent-foreground: oklch(1 0 0);
-  --sidebar-border: oklch(0.25 0 0);
-  --sidebar-ring: oklch(0.6 0.2 29);
-}
+  /* --- KRATU core --- */
+  --kr-ink: #0e0c08;
+  --kr-ink-2: #16130c;
+  --kr-ink-3: #1e1a11;
+  --kr-gold: #c9a35b;
+  --kr-gold-soft: #d9b878;
+  --kr-gold-deep: #a8823f;
+  --kr-light: #efeae0;
+  --kr-body: #d8d1c4;
+  --kr-muted: #a99f8c;
+  --kr-hairline: rgba(201, 163, 91, 0.22);
+  --kr-hairline-2: rgba(239, 234, 224, 0.1);
 
-.dark {
-  --background: oklch(0.05 0 0);
-  --foreground: oklch(1 0 0);
-  --card: oklch(0.15 0 0);
-  --card-foreground: oklch(1 0 0);
-  --popover: oklch(0.15 0 0);
-  --popover-foreground: oklch(1 0 0);
-  --primary: oklch(0.6 0.2 41);
-  --primary-foreground: oklch(0 0 0);
-  --secondary: oklch(0.15 0 0);
-  --secondary-foreground: oklch(1 0 0);
-  --muted: oklch(0.4 0 0);
-  --muted-foreground: oklch(0.6 0 0);
-  --accent: oklch(0.6 0.2 29);
-  --accent-foreground: oklch(1 0 0);
-  --destructive: oklch(0.5 0.2 15);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.25 0 0);
-  --input: oklch(0.15 0 0);
-  --ring: oklch(0.6 0.2 29);
-  --chart-1: oklch(0.6 0.2 41);
-  --chart-2: oklch(0.7 0.15 200);
-  --chart-3: oklch(0.5 0.1 300);
-  --chart-4: oklch(0.6 0.2 29);
-  --chart-5: oklch(0.55 0.18 50);
-  --sidebar: oklch(0.1 0 0);
-  --sidebar-foreground: oklch(1 0 0);
-  --sidebar-primary: oklch(0.6 0.2 41);
-  --sidebar-primary-foreground: oklch(0 0 0);
-  --sidebar-accent: oklch(0.6 0.2 29);
-  --sidebar-accent-foreground: oklch(1 0 0);
-  --sidebar-border: oklch(0.25 0 0);
-  --sidebar-ring: oklch(0.6 0.2 29);
+  /* --- action (hero only) --- */
+  --kr-action: #ff7a1a;
+  --kr-action-deep: #e2620c;
+
+  /* --- verdict --- */
+  --kr-pass: #5f9e78;
+  --kr-pass-dim: rgba(95, 158, 120, 0.14);
+  --kr-warn: #d9a03f;
+  --kr-warn-dim: rgba(217, 160, 63, 0.14);
+  --kr-fail: #c0524f;
+  --kr-fail-dim: rgba(192, 82, 79, 0.14);
+  --kr-info: #6d8fa8;
+  --kr-info-dim: rgba(109, 143, 168, 0.14);
+
+  /* --- severity (findings) --- */
+  --kr-critical: #c0524f;
+  --kr-major: #cf7d3c;
+  --kr-minor: #7f93a6;
+
+  --radius: 14px;
+
+  /* --- shadcn contract, remapped onto KRATU --- */
+  --background: var(--kr-ink);
+  --foreground: var(--kr-light);
+  --card: var(--kr-ink-2);
+  --card-foreground: var(--kr-light);
+  --popover: #171309;
+  --popover-foreground: var(--kr-light);
+  --primary: var(--kr-gold);
+  --primary-foreground: var(--kr-ink);
+  --secondary: var(--kr-ink-3);
+  --secondary-foreground: var(--kr-light);
+  --muted: var(--kr-ink-3);
+  --muted-foreground: var(--kr-muted);
+  --accent: var(--kr-ink-3);
+  --accent-foreground: var(--kr-gold-soft);
+  --destructive: var(--kr-fail);
+  --destructive-foreground: var(--kr-light);
+  --border: var(--kr-hairline);
+  --input: var(--kr-ink-3);
+  --ring: var(--kr-gold-deep);
+  --chart-1: var(--kr-gold);
+  --chart-2: var(--kr-pass);
+  --chart-3: var(--kr-info);
+  --chart-4: var(--kr-warn);
+  --chart-5: var(--kr-fail);
+  --sidebar: var(--kr-ink-2);
+  --sidebar-foreground: var(--kr-light);
+  --sidebar-primary: var(--kr-gold);
+  --sidebar-primary-foreground: var(--kr-ink);
+  --sidebar-accent: var(--kr-ink-3);
+  --sidebar-accent-foreground: var(--kr-gold-soft);
+  --sidebar-border: var(--kr-hairline);
+  --sidebar-ring: var(--kr-gold-deep);
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --font-sans: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-fraunces), Georgia, 'Times New Roman', serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, Menlo, Consolas, monospace;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -101,15 +115,30 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+
+  --color-kr-ink: var(--kr-ink);
+  --color-kr-ink-2: var(--kr-ink-2);
+  --color-kr-ink-3: var(--kr-ink-3);
+  --color-kr-gold: var(--kr-gold);
+  --color-kr-gold-soft: var(--kr-gold-soft);
+  --color-kr-gold-deep: var(--kr-gold-deep);
+  --color-kr-light: var(--kr-light);
+  --color-kr-body: var(--kr-body);
+  --color-kr-muted: var(--kr-muted);
+  --color-kr-action: var(--kr-action);
+  --color-kr-pass: var(--kr-pass);
+  --color-kr-warn: var(--kr-warn);
+  --color-kr-fail: var(--kr-fail);
+  --color-kr-info: var(--kr-info);
+  --color-kr-critical: var(--kr-critical);
+  --color-kr-major: var(--kr-major);
+  --color-kr-minor: var(--kr-minor);
+
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 4px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -124,99 +153,212 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
-  }
-  
+
   html {
-    background: linear-gradient(135deg, #0a1628 0%, #0d2847 50%, #081a2d 100%);
+    background-color: var(--kr-ink);
   }
-  
-  /* Tech grid overlay */
+
+  body {
+    background-color: var(--kr-ink);
+    color: var(--kr-body);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Matte ink, not flat black: two very wide warm pools plus a fine grain, so
+     the surface reads as paper/stone under light rather than a void. The grain
+     is a single inline feTurbulence at low opacity — cheaper than a texture
+     request and it never tiles visibly. */
   body::before {
     content: '';
     position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-image: 
-      linear-gradient(0deg, transparent 24%, rgba(255, 255, 255, .03) 25%, rgba(255, 255, 255, .03) 26%, transparent 27%, transparent 74%, rgba(255, 255, 255, .03) 75%, rgba(255, 255, 255, .03) 76%, transparent 77%, transparent),
-      linear-gradient(90deg, transparent 24%, rgba(255, 255, 255, .03) 25%, rgba(255, 255, 255, .03) 26%, transparent 27%, transparent 74%, rgba(255, 255, 255, .03) 75%, rgba(255, 255, 255, .03) 76%, transparent 77%, transparent);
-    background-size: 50px 50px;
+    inset: 0;
     pointer-events: none;
-    z-index: 1;
+    z-index: 0;
+    background-image:
+      radial-gradient(60rem 40rem at 12% -10%, rgba(201, 163, 91, 0.05), transparent 60%),
+      radial-gradient(48rem 36rem at 108% 8%, rgba(168, 130, 63, 0.045), transparent 62%),
+      radial-gradient(52rem 40rem at 50% 118%, rgba(201, 163, 91, 0.03), transparent 65%);
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  ::selection {
+    background: rgba(201, 163, 91, 0.28);
+    color: var(--kr-light);
+  }
+
+  /* Gold, thin, unobtrusive — matches the hairline language. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--kr-ink);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(201, 163, 91, 0.22);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(201, 163, 91, 0.38);
   }
 }
 
 @layer components {
-  .glass {
-    @apply bg-black/20 backdrop-blur-3xl border border-white/15 shadow-[0_8px_32px_rgba(255,140,0,0.25)];
+  /* ---- surfaces -------------------------------------------------------- */
+
+  /* One card treatment for every panel. Previously each card carried its own
+     inline shadow, which is why some panels read heavier than others. */
+  .kr-card {
+    /* Solid fallback first: color-mix() is well supported now, but a browser
+       without it would otherwise render a card with no surface at all. */
+    background: var(--kr-ink-2);
+    background: color-mix(in srgb, var(--kr-ink-2) 88%, transparent);
+    border: 1px solid var(--kr-hairline);
+    border-radius: var(--radius);
+    box-shadow:
+      0 1px 0 rgba(239, 234, 224, 0.03) inset,
+      0 18px 48px -30px rgba(0, 0, 0, 0.9);
   }
-  
-  .glass-amber {
-    @apply bg-black/20 backdrop-blur-3xl border border-amber-500/30 shadow-[0_8px_40px_rgba(255,140,0,0.35)];
+
+  .kr-card-quiet {
+    background: var(--kr-ink-2);
+    background: color-mix(in srgb, var(--kr-ink-2) 55%, transparent);
+    border: 1px solid var(--kr-hairline-2);
+    border-radius: var(--radius);
   }
-  
-  .gold-text {
-    background: linear-gradient(
-      135deg,
-      #ffd700 0%,
-      #ffed4e 15%,
-      #ffc700 30%,
-      #ffd700 45%,
-      #ffed4e 60%,
-      #ffc700 75%,
-      #ffd700 100%
-    );
-    background-size: 200% 200%;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    animation: shimmer 3s ease-in-out infinite;
+
+  /* Verdict-tinted panel. Tint is carried by a left rule + a whisper of fill,
+     never a glow, so a status never competes with the action colour. */
+  .kr-verdict {
+    border: 1px solid var(--kr-hairline-2);
+    border-left-width: 3px;
+    border-radius: var(--radius);
   }
-  
-  .gold-glow {
-    filter: drop-shadow(0 0 20px rgba(255, 215, 0, 0.8)) drop-shadow(0 0 10px rgba(255, 237, 74, 0.6));
+
+  /* ---- type ------------------------------------------------------------ */
+
+  .kr-serif {
+    font-family: var(--font-serif);
+    font-optical-sizing: auto;
   }
-  
-  @keyframes shimmer {
-    0%, 100% {
-      background-position: 0% 50%;
-    }
-    50% {
-      background-position: 100% 50%;
-    }
+
+  /* Gold uppercase micro-label. Structure, never status. */
+  .kr-eyebrow {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--kr-gold);
+    opacity: 0.82;
   }
-  
-  .orange-glow {
-    @apply shadow-[0_0_50px_rgba(255,140,0,0.9)_,_0_0_30px_rgba(255,100,0,0.6)];
+
+  .kr-label {
+    font-family: var(--font-sans);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--kr-muted);
   }
-  
-  .orange-glow-pulse {
-    @apply shadow-[0_0_50px_rgba(255,140,0,0.9)_,_0_0_30px_rgba(255,100,0,0.6)] hover:shadow-[0_0_80px_rgba(255,140,0,1)_,_0_0_50px_rgba(255,100,0,0.8)] transition-shadow duration-300;
+
+  .kr-data {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
   }
-  
-  .radar-pulse {
-    animation: radar-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+
+  /* Wordmark: KRATU in light, AI LABS in gold, per the locked email spec. */
+  .kr-wordmark {
+    font-family: var(--font-serif);
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    color: var(--kr-light);
+    text-transform: uppercase;
   }
-  
-  @keyframes radar-pulse {
-    0%, 100% {
-      opacity: 0.5;
-      filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.3));
+  .kr-wordmark em {
+    font-style: normal;
+    color: var(--kr-gold);
+  }
+
+  .kr-tagline {
+    font-family: var(--font-sans);
+    font-size: 9.5px;
+    letter-spacing: 0.34em;
+    text-transform: uppercase;
+    color: #b3a988;
+  }
+
+  /* ---- controls -------------------------------------------------------- */
+
+  /* The only bright thing on the screen. */
+  .kr-action {
+    background: linear-gradient(180deg, var(--kr-action) 0%, var(--kr-action-deep) 100%);
+    color: #150c04;
+    box-shadow: 0 10px 30px -14px rgba(255, 122, 26, 0.6);
+  }
+  .kr-action:hover:not(:disabled) {
+    box-shadow: 0 12px 34px -12px rgba(255, 122, 26, 0.78);
+  }
+  .kr-action:disabled {
+    background: var(--kr-ink-3);
+    color: var(--kr-muted);
+    box-shadow: none;
+  }
+
+  .kr-ghost {
+    background: transparent;
+    border: 1px solid var(--kr-hairline);
+    color: var(--kr-gold-soft);
+  }
+  .kr-ghost:hover {
+    background: rgba(201, 163, 91, 0.07);
+    border-color: var(--kr-gold-deep);
+  }
+
+  .kr-field {
+    background: var(--kr-ink);
+    background: color-mix(in srgb, var(--kr-ink) 70%, transparent);
+    border: 1px solid var(--kr-hairline);
+    color: var(--kr-light);
+  }
+  .kr-field:focus,
+  .kr-field:focus-visible {
+    border-color: var(--kr-gold-deep);
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(201, 163, 91, 0.12);
+  }
+
+  /* ---- motion ---------------------------------------------------------- */
+
+  .kr-sweep {
+    animation: kr-sweep 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes kr-sweep {
+    0%,
+    100% {
+      opacity: 0.45;
     }
     50% {
       opacity: 1;
-      filter: drop-shadow(0 0 20px rgba(251, 191, 36, 0.8));
     }
   }
-  
-  .glow-ring {
-    animation: glow-spin 3s linear infinite;
+
+  .kr-spin {
+    animation: kr-spin 2.8s linear infinite;
+    transform-origin: 50% 50%;
   }
-  
-  @keyframes glow-spin {
+  @keyframes kr-spin {
     from {
       transform: rotate(0deg);
     }
@@ -224,8 +366,11 @@
       transform: rotate(360deg);
     }
   }
-  
-  .glow-text-orange {
-    @apply text-orange-500 font-bold animate-pulse drop-shadow-[0_0_15px_rgba(255,140,0,1)] drop-shadow-[0_0_8px_rgba(255,100,0,0.8)];
+
+  @media (prefers-reduced-motion: reduce) {
+    .kr-sweep,
+    .kr-spin {
+      animation: none;
+    }
   }
 }

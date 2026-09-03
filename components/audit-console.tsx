@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo, useState, type ChangeEvent } from 'react';
+import Image from 'next/image';
+import { useMemo, useState, type ChangeEvent, type CSSProperties } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -11,7 +12,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { AlertCircle, AlertTriangle, Crosshair, Info, ShieldAlert, Upload } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Info, ShieldAlert, Upload } from 'lucide-react';
+import { BRAND } from '@/lib/brand';
 import {
   REGIONS,
   US_DEFAULTS,
@@ -96,7 +98,26 @@ interface AuditError {
   message: string;
 }
 
+// ---------------------------------------------------------------------------
+// Verdict colour. Deliberately NOT the brand accent: green-means-pass is close
+// to sacred in life-safety work, and the action orange is reserved for controls
+// so a status can never be confused with something clickable.
+// ---------------------------------------------------------------------------
+
 type Tone = 'good' | 'warn' | 'bad' | 'neutral';
+
+interface ToneSpec {
+  rule: string;
+  fill: string;
+  text: string;
+}
+
+const TONES: Record<Tone, ToneSpec> = {
+  good: { rule: 'var(--kr-pass)', fill: 'var(--kr-pass-dim)', text: 'var(--kr-pass)' },
+  warn: { rule: 'var(--kr-warn)', fill: 'var(--kr-warn-dim)', text: 'var(--kr-warn)' },
+  bad: { rule: 'var(--kr-fail)', fill: 'var(--kr-fail-dim)', text: 'var(--kr-fail)' },
+  neutral: { rule: 'var(--kr-hairline)', fill: 'transparent', text: 'var(--kr-muted)' },
+};
 
 function statusTone(status: string | undefined): Tone {
   switch ((status ?? '').toUpperCase()) {
@@ -114,24 +135,10 @@ function statusTone(status: string | undefined): Tone {
   }
 }
 
-const TONE_PANEL: Record<Tone, string> = {
-  good: 'border-emerald-500/40 bg-emerald-950/20',
-  warn: 'border-amber-500/40 bg-amber-950/20',
-  bad: 'border-red-500/40 bg-red-950/20',
-  neutral: 'border-white/10 bg-slate-900/30',
-};
-
-const TONE_BADGE: Record<Tone, string> = {
-  good: 'bg-emerald-500/20 border-emerald-400 text-emerald-300 drop-shadow-[0_0_10px_rgba(16,185,129,0.5)]',
-  warn: 'bg-amber-500/20 border-amber-400 text-amber-300 drop-shadow-[0_0_10px_rgba(251,191,36,0.5)]',
-  bad: 'bg-red-500/20 border-red-400 text-red-300 drop-shadow-[0_0_10px_rgba(248,113,113,0.5)]',
-  neutral: 'bg-slate-500/20 border-slate-400 text-slate-300',
-};
-
-const SEVERITY_BADGE: Record<string, string> = {
-  CRITICAL: 'bg-red-500/20 border-red-400/70 text-red-300',
-  MAJOR: 'bg-orange-500/20 border-orange-400/70 text-orange-300',
-  MINOR: 'bg-sky-500/15 border-sky-400/60 text-sky-300',
+const SEVERITY_COLOR: Record<string, string> = {
+  CRITICAL: 'var(--kr-critical)',
+  MAJOR: 'var(--kr-major)',
+  MINOR: 'var(--kr-minor)',
 };
 
 const SEVERITY_ORDER: Record<string, number> = { CRITICAL: 0, MAJOR: 1, MINOR: 2 };
@@ -140,12 +147,11 @@ const SEVERITY_ORDER: Record<string, number> = { CRITICAL: 0, MAJOR: 1, MINOR: 2
  * Hint for the currently selected option, rendered as helper text beneath the
  * Select rather than inside the list items.
  *
- * shadcn's SelectItem wraps *all* its children in Radix's ItemText, and Radix
- * mirrors ItemText content into the trigger. A two-line item therefore renders
- * both lines stacked inside the closed trigger, which looks broken. Keeping
- * items single-line and surfacing the hint separately avoids that entirely —
- * and it stays visible when the list is closed, which is when it actually
- * matters (e.g. "Florida is NFPA-based, not IFC").
+ * shadcn's SelectItem wraps all its children in Radix's ItemText, and Radix
+ * mirrors ItemText content into the trigger, so a two-line item renders both
+ * lines stacked inside the closed trigger. Keeping items single-line and
+ * surfacing the hint separately also keeps it visible while the list is closed,
+ * which is when it matters — e.g. "Florida is NFPA-based, not IFC".
  */
 function hintFor(options: Option[], value: string): string | undefined {
   return options.find((opt) => opt.value === value)?.hint;
@@ -165,11 +171,7 @@ function asArray<T>(value: T[] | string | undefined): T[] {
   return [];
 }
 
-const CARD = 'glass rounded-lg border-white/5';
-const CARD_SHADOW = { boxShadow: '0 4px 12px rgba(255, 140, 0, 0.08)' };
-const FIELD_LABEL = 'text-xs uppercase tracking-widest text-amber-400/70 font-semibold';
-const SELECT_TRIGGER =
-  'glass-amber w-full h-11 text-sm text-white border-amber-500/25 data-[placeholder]:text-gray-600 focus:ring-0 focus:border-amber-400/60';
+const SELECT_TRIGGER = 'kr-field w-full h-11 rounded-md text-sm data-[placeholder]:text-kr-muted';
 
 export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }) {
   const [region, setRegion] = useState<RegionKey>(enabledRegions[0] ?? 'IND');
@@ -287,6 +289,7 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
 
   // ------------------------------------------------------------- derived view
   const tone = statusTone(result?.status);
+  const toneSpec = TONES[tone];
   const violations = useMemo(() => asArray<string>(result?.violations), [result]);
   const deficiencies = useMemo(() => {
     const list = asArray<Deficiency>(result?.deficiencies);
@@ -297,6 +300,7 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
     );
   }, [result]);
   const unverifiable = useMemo(() => asArray<string>(result?.unverifiable_items), [result]);
+  const reinspectReasons = useMemo(() => asArray<string>(result?.reinspect_reasons), [result]);
 
   const hasFindings = deficiencies.length > 0 || violations.length > 0;
   const codeBasisText = result?.code_basis?.fire_code ?? regionDef.codeBasisFallback;
@@ -314,32 +318,47 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
       : '—';
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950">
-      <div className="relative z-10 p-8">
-        <div className="max-w-7xl mx-auto">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
-            {/* ================= LEFT COLUMN ================= */}
-            <div className="space-y-8">
+    <div className="relative min-h-screen">
+      <div className="relative z-10 px-6 py-10 sm:px-10">
+        <div className="mx-auto max-w-7xl">
+          {/* ===================== MASTHEAD ===================== */}
+          <header className="mb-12 flex flex-wrap items-end justify-between gap-6 border-b border-[var(--kr-hairline)] pb-7">
+            <div className="flex items-center gap-4">
+              <Image
+                src={BRAND.markSrc}
+                alt=""
+                width={52}
+                height={52}
+                priority
+                className="h-[52px] w-[52px] shrink-0"
+              />
               <div>
-                <h1
-                  className="text-6xl font-black gold-text leading-none"
-                  style={{ filter: 'drop-shadow(0 0 10px rgba(255, 170, 0, 0.25))' }}
-                >
-                  FIREHAWK
-                </h1>
-                <p className="text-amber-600/60 text-sm uppercase tracking-widest mt-3 font-medium">
-                  AI Compliance Command Center
-                </p>
+                <div className="kr-wordmark text-[19px] leading-none">
+                  {BRAND.companyFirst} <em>{BRAND.companySecond}</em>
+                </div>
+                <div className="mt-[7px] h-px w-full bg-[var(--kr-gold)] opacity-45" />
+                <div className="kr-tagline mt-[7px]">{BRAND.tagline}</div>
               </div>
+            </div>
 
-              {/* Region switch — rendered only when this deployment permits
-                  more than one region. A single-region deployment shows a
-                  static label instead, so a customer never sees the other
-                  jurisdiction exists. */}
+            <div className="text-right">
+              <h1 className="kr-serif text-[26px] leading-none tracking-[0.1em] text-kr-light">
+                {BRAND.productName}
+              </h1>
+              <p className="kr-label mt-2">{BRAND.productDescriptor}</p>
+            </div>
+          </header>
+
+          <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+            {/* ===================== INPUTS ===================== */}
+            <div className="space-y-7">
+              {/* Region. Rendered only when this deployment permits more than
+                  one; a single-region deployment shows a static label so a
+                  customer never sees the other jurisdiction exists. */}
               {showRegionSwitch ? (
-                <div className="space-y-3">
-                  <span className={FIELD_LABEL}>Code Region</span>
-                  <div className="glass-amber rounded-lg p-1 grid grid-cols-2 gap-1">
+                <section className="space-y-3">
+                  <span className="kr-eyebrow">Code Region</span>
+                  <div className="grid grid-cols-2 gap-2">
                     {enabledRegions.map((key) => {
                       const def = REGIONS[key];
                       const active = key === region;
@@ -353,17 +372,19 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                             resetOutput();
                           }}
                           className={`rounded-md px-4 py-3 text-left transition-all duration-200 ${
-                            active
-                              ? 'bg-gradient-to-b from-orange-500 to-orange-600 text-black shadow-[0_0_18px_rgba(255,140,0,0.35)]'
-                              : 'text-amber-400/70 hover:bg-amber-500/10 hover:text-amber-300'
+                            active ? 'kr-action' : 'kr-card-quiet hover:border-[var(--kr-gold-deep)]'
                           }`}
                         >
-                          <span className="block text-sm font-bold uppercase tracking-wider">
+                          <span
+                            className={`block text-[13px] font-semibold uppercase tracking-[0.14em] ${
+                              active ? '' : 'text-kr-light'
+                            }`}
+                          >
                             {def.label}
                           </span>
                           <span
-                            className={`block text-[10px] mt-1 tracking-wide ${
-                              active ? 'text-black/70' : 'text-amber-600/50'
+                            className={`mt-1 block text-[10px] tracking-wide ${
+                              active ? 'opacity-70' : 'text-kr-muted'
                             }`}
                           >
                             {def.codeLabel}
@@ -372,16 +393,18 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                       );
                     })}
                   </div>
-                </div>
+                </section>
               ) : (
-                <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-amber-500/50 font-semibold">
-                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400/70" />
-                  {regionDef.label} · {regionDef.codeLabel}
+                <div className="flex items-center gap-2">
+                  <span className="h-1 w-1 rounded-full bg-[var(--kr-gold)]" />
+                  <span className="kr-label">
+                    {regionDef.label} · {regionDef.codeLabel}
+                  </span>
                 </div>
               )}
 
-              <div className="space-y-3">
-                <label htmlFor="site-id" className={FIELD_LABEL}>
+              <section className="space-y-3">
+                <label htmlFor="site-id" className="kr-eyebrow block">
                   Site ID / Location Code
                 </label>
                 <Input
@@ -389,22 +412,19 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                   placeholder={regionDef.siteIdPlaceholder}
                   value={siteId}
                   onChange={(e) => setSiteId(e.target.value)}
-                  className="glass-amber placeholder:text-gray-600 text-white focus:ring-0 focus:border-amber-400/60 pl-4 h-12 text-sm"
+                  className="kr-field kr-data h-12 rounded-md px-4 text-sm placeholder:text-kr-muted/50"
                 />
-              </div>
+              </section>
 
-              {/* US-only inputs. The India workflow has no jurisdiction concept
-                  — it hardcodes NBC 2016 + CFO Mumbai — so these are driven off
-                  the region registry rather than shown unconditionally. */}
+              {/* US-only. The India workflow hardcodes NBC 2016 + CFO Mumbai and
+                  has no jurisdiction concept, so these come from the registry. */}
               {region === 'US' && (
-                <div className="space-y-5 rounded-lg border border-amber-500/20 bg-amber-500/[0.03] p-5">
-                  <p className="text-[10px] uppercase tracking-widest text-amber-500/60 font-semibold">
-                    Jurisdiction & Scope
-                  </p>
+                <section className="kr-card space-y-5 p-5">
+                  <span className="kr-eyebrow">Jurisdiction &amp; Scope</span>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <label className={FIELD_LABEL}>Jurisdiction</label>
+                      <label className="kr-label block">Jurisdiction</label>
                       <Select value={jurisdiction} onValueChange={setJurisdiction}>
                         <SelectTrigger className={SELECT_TRIGGER}>
                           <SelectValue />
@@ -418,14 +438,14 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                         </SelectContent>
                       </Select>
                       {hintFor(US_JURISDICTIONS, jurisdiction) && (
-                        <p className="text-[10px] text-gray-500 leading-relaxed">
+                        <p className="text-[10px] leading-relaxed text-kr-muted">
                           {hintFor(US_JURISDICTIONS, jurisdiction)}
                         </p>
                       )}
                     </div>
 
                     <div className="space-y-2">
-                      <label className={FIELD_LABEL}>Occupancy</label>
+                      <label className="kr-label block">Occupancy</label>
                       <Select value={occupancy} onValueChange={setOccupancy}>
                         <SelectTrigger className={SELECT_TRIGGER}>
                           <SelectValue />
@@ -442,7 +462,7 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                   </div>
 
                   <div className="space-y-2">
-                    <label className={FIELD_LABEL}>Equipment Checklist</label>
+                    <label className="kr-label block">Equipment Checklist</label>
                     <Select value={equipmentHint} onValueChange={setEquipmentHint}>
                       <SelectTrigger className={SELECT_TRIGGER}>
                         <SelectValue />
@@ -456,24 +476,25 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                       </SelectContent>
                     </Select>
                     {hintFor(US_EQUIPMENT, equipmentHint) && (
-                      <p className="text-[10px] text-gray-500 leading-relaxed">
+                      <p className="text-[10px] leading-relaxed text-kr-muted">
                         {hintFor(US_EQUIPMENT, equipmentHint)}
                       </p>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between gap-4 pt-1">
+                  <div className="flex items-center justify-between gap-4 border-t border-[var(--kr-hairline-2)] pt-4">
                     <div>
-                      <p className="text-xs text-white font-semibold">OSHA overlay</p>
-                      <p className="text-[10px] text-gray-500 mt-1">
+                      <p className="text-xs font-semibold text-kr-light">OSHA overlay</p>
+                      <p className="mt-1 text-[10px] text-kr-muted">
                         Apply 29 CFR 1910 workplace duties
                       </p>
                     </div>
                     <Switch checked={oshaWorkplace} onCheckedChange={setOshaWorkplace} />
                   </div>
-                </div>
+                </section>
               )}
 
+              {/* Evidence */}
               <div
                 onDrop={(e) => {
                   e.preventDefault();
@@ -486,12 +507,9 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                 }}
                 onDragLeave={() => setDragActive(false)}
                 onClick={() => document.getElementById('image-input')?.click()}
-                className={`relative glass-amber rounded-lg cursor-pointer transition-all duration-300 overflow-hidden ${
-                  dragActive
-                    ? 'border-amber-400/60 bg-amber-500/5'
-                    : 'border-amber-500/20 hover:border-amber-400/40'
+                className={`kr-card cursor-pointer overflow-hidden transition-colors duration-200 ${
+                  dragActive ? 'border-[var(--kr-gold)]' : 'hover:border-[var(--kr-gold-deep)]'
                 }`}
-                style={{ boxShadow: '0 4px 15px rgba(255, 140, 0, 0.1)' }}
               >
                 <input
                   id="image-input"
@@ -503,25 +521,21 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
 
                 {preview ? (
                   <div className="relative">
-                    <img
-                      src={preview}
-                      alt="Uploaded equipment"
-                      className="w-full h-64 object-cover opacity-80"
-                    />
-                    <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-950 via-slate-950/80 to-transparent p-4">
-                      <p className="text-amber-400 text-xs font-mono truncate">✓ {file?.name}</p>
+                    {/* Local blob: preview — plain img by design, next/image
+                        cannot optimise an in-memory object URL. */}
+                    <img src={preview} alt="Audit subject" className="h-60 w-full object-cover" />
+                    <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--kr-ink)] via-[var(--kr-ink)]/85 to-transparent p-4">
+                      <p className="kr-data truncate text-[11px] text-kr-gold-soft">{file?.name}</p>
                     </div>
                   </div>
                 ) : (
-                  <div className="p-12 flex flex-col items-center justify-center space-y-4">
-                    <div className="p-4 rounded-lg bg-orange-500/20 border border-orange-500/50">
-                      <Upload className="w-8 h-8 text-orange-400" />
+                  <div className="flex flex-col items-center justify-center gap-4 p-12">
+                    <div className="rounded-md border border-[var(--kr-hairline)] p-3.5">
+                      <Upload className="h-6 w-6 text-kr-gold" />
                     </div>
                     <div className="text-center">
-                      <p className="text-white font-semibold text-sm">UPLOAD EQUIPMENT IMAGE</p>
-                      <p className="text-amber-600/50 text-xs mt-2 uppercase tracking-wide">
-                        Drag &amp; drop or click
-                      </p>
+                      <p className="text-sm font-semibold text-kr-light">Upload equipment image</p>
+                      <p className="kr-label mt-2">Drag &amp; drop or click</p>
                     </div>
                   </div>
                 )}
@@ -530,211 +544,208 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
               <Button
                 onClick={handleRunAudit}
                 disabled={!siteId || !file || loading}
-                className={`w-full h-14 font-bold uppercase tracking-wider text-sm rounded-lg transition-all duration-300 ${
-                  siteId && file && !loading
-                    ? 'bg-gradient-to-b from-orange-500 to-orange-600 hover:shadow-[0_0_20px_rgba(255,140,0,0.4)] text-black'
-                    : 'bg-gradient-to-b from-orange-600/30 to-orange-500/30 text-gray-500 cursor-not-allowed'
-                }`}
+                className="kr-action h-14 w-full rounded-md text-[13px] font-bold uppercase tracking-[0.16em] transition-shadow duration-300"
               >
-                {loading
-                  ? 'PROCESSING...'
-                  : siteId && file
-                    ? 'INITIATE AUDIT SEQUENCE'
-                    : 'AWAITING INPUT'}
+                {loading ? 'Analysing…' : siteId && file ? 'Initiate audit' : 'Awaiting input'}
               </Button>
 
               {error && (
-                <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-950/20 px-4 py-3">
-                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div
+                  className="kr-verdict flex items-start gap-3 px-4 py-3"
+                  style={{ borderLeftColor: TONES.bad.rule, background: TONES.bad.fill }}
+                >
+                  <AlertCircle
+                    className="mt-0.5 h-4 w-4 shrink-0"
+                    style={{ color: TONES.bad.text }}
+                  />
                   <div className="space-y-1">
                     {error.code && (
-                      <p className="text-red-400 text-[10px] font-mono uppercase tracking-widest">
+                      <p className="kr-data text-[10px] uppercase tracking-[0.16em] text-kr-muted">
                         {error.code}
                       </p>
                     )}
-                    <p className="text-red-300 text-xs font-mono">{error.message}</p>
+                    <p className="text-xs text-kr-body">{error.message}</p>
                   </div>
                 </div>
               )}
 
-              <div className="text-xs text-gray-600/60 uppercase tracking-wider font-mono">
+              <p className="kr-label">
                 Status: {loading ? 'Processing' : siteId && file ? 'Ready' : 'Incomplete'}
-              </div>
-
-              <div className="pt-4">
-                <p className="text-[10px] uppercase tracking-widest text-amber-500/40 font-semibold">
-                  Engineered by <span className="text-amber-400/60">Arvami Solutionz</span>
-                </p>
-              </div>
+              </p>
             </div>
 
-            {/* ================= RIGHT COLUMN ================= */}
-            <div className="flex items-center justify-center min-h-96">
+            {/* ===================== OUTPUT ===================== */}
+            <div>
               {state === 'empty' && (
-                <div
-                  className="w-full glass rounded-lg p-12 flex flex-col items-center justify-center space-y-6 border-amber-500/20 hover:border-amber-500/30 transition-colors"
-                  style={CARD_SHADOW}
-                >
-                  <div className="relative w-20 h-20">
-                    <Crosshair className="w-full h-full text-amber-600/40 radar-pulse" />
-                  </div>
+                <div className="kr-card flex min-h-[420px] flex-col items-center justify-center gap-6 p-12">
+                  <svg viewBox="0 0 100 100" className="h-16 w-16">
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="34"
+                      fill="none"
+                      stroke="var(--kr-hairline)"
+                      strokeWidth="1"
+                    />
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="22"
+                      fill="none"
+                      stroke="var(--kr-hairline)"
+                      strokeWidth="1"
+                    />
+                    <path
+                      d="M50 8 L50 24 M50 76 L50 92 M8 50 L24 50 M76 50 L92 50"
+                      stroke="var(--kr-gold)"
+                      strokeWidth="1.25"
+                      className="kr-sweep"
+                    />
+                    <circle cx="50" cy="50" r="2.5" fill="var(--kr-gold)" />
+                  </svg>
                   <div className="text-center">
-                    <p className="text-amber-400/60 uppercase text-xs tracking-widest font-semibold">
-                      awaiting target acquisition
-                    </p>
-                    <p className="text-gray-600 text-xs mt-3">
-                      Ready to scan equipment · {regionDef.codeLabel}
-                    </p>
+                    <p className="kr-eyebrow">Awaiting evidence</p>
+                    <p className="mt-3 text-xs text-kr-muted">{regionDef.codeLabel}</p>
                   </div>
                 </div>
               )}
 
               {state === 'loading' && (
-                <div className="w-full space-y-8 flex flex-col items-center justify-center">
-                  <div className="relative w-32 h-32">
-                    <svg className="w-full h-full glow-ring" viewBox="0 0 100 100">
-                      <circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255, 140, 0, 0.4)" strokeWidth="2" />
-                      <circle
-                        cx="50"
-                        cy="50"
-                        r="40"
-                        fill="none"
-                        stroke="url(#grad)"
-                        strokeWidth="3"
-                        strokeDasharray="251"
-                        strokeDashoffset="0"
-                        style={{ animation: 'spin 3s linear infinite' }}
-                      />
-                      <circle
-                        cx="50"
-                        cy="10"
-                        r="4"
-                        fill="rgba(255, 140, 0, 1)"
-                        style={{ filter: 'drop-shadow(0 0 12px rgba(255, 140, 0, 1))' }}
-                      />
-                      <defs>
-                        <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor="rgba(255, 140, 0, 1)" />
-                          <stop offset="50%" stopColor="rgba(255, 100, 0, 0.8)" />
-                          <stop offset="100%" stopColor="rgba(255, 140, 0, 0.3)" />
-                        </linearGradient>
-                      </defs>
-                    </svg>
-                  </div>
-                  <div className="text-center space-y-2">
-                    <p className="glow-text-orange uppercase font-bold text-lg">
-                      ANALYZING VISUAL DATA
+                <div className="kr-card flex min-h-[420px] flex-col items-center justify-center gap-8 p-12">
+                  <svg viewBox="0 0 100 100" className="h-24 w-24">
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="36"
+                      fill="none"
+                      stroke="var(--kr-hairline)"
+                      strokeWidth="1.5"
+                    />
+                    <circle
+                      cx="50"
+                      cy="50"
+                      r="36"
+                      fill="none"
+                      stroke="var(--kr-gold)"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeDasharray="56 170"
+                      className="kr-spin"
+                    />
+                  </svg>
+                  <div className="space-y-2 text-center">
+                    <p className="kr-serif text-lg tracking-[0.06em] text-kr-light">
+                      Analysing evidence
                     </p>
-                    {/* Was hardcoded "Running NBC 2016 compliance checks". */}
-                    <p className="text-gray-600 text-sm uppercase tracking-wider">
-                      Running {regionDef.codeLabel} checks
-                    </p>
+                    <p className="kr-label">Against {regionDef.codeLabel}</p>
                   </div>
-                  <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
                 </div>
               )}
 
               {state === 'success' && result && (
-                <div className="w-full space-y-4">
-                  {/* -------- status header -------- */}
-                  <div className={`glass rounded-lg p-6 border-2 ${TONE_PANEL[tone]}`} style={CARD_SHADOW}>
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <h2 className="text-white font-bold uppercase tracking-wider text-sm">
-                          Compliance Status
-                        </h2>
-                        <p className="text-[10px] text-gray-500 mt-1 font-mono">{codeBasisText}</p>
+                <div className="space-y-4">
+                  {/* -------- verdict -------- */}
+                  <section
+                    className="kr-verdict p-6"
+                    style={{ borderLeftColor: toneSpec.rule, background: toneSpec.fill }}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <h2 className="kr-eyebrow">Compliance Status</h2>
+                        <p className="kr-serif mt-2 text-2xl leading-tight tracking-[0.04em]"
+                          style={{ color: toneSpec.text }}>
+                          {result.status ?? 'UNKNOWN'}
+                        </p>
+                        <p className="mt-2 max-w-xl text-[11px] leading-relaxed text-kr-muted">
+                          {codeBasisText}
+                        </p>
                       </div>
-                      <span
-                        className={`px-4 py-2 rounded-full text-xs font-bold uppercase tracking-wider border animate-pulse shrink-0 ${TONE_BADGE[tone]}`}
-                      >
-                        {result.status ?? 'UNKNOWN'}
-                      </span>
+
+                      {typeof result.risk_score === 'number' && (
+                        <div className="text-right">
+                          <p className="kr-label">Risk</p>
+                          <p className="kr-data mt-1 text-2xl text-kr-light">{result.risk_score}</p>
+                        </div>
+                      )}
                     </div>
 
-                    {(typeof result.risk_score === 'number' || result.severity_counts) && (
-                      <div className="flex items-center gap-4 mt-5 pt-4 border-t border-white/10 flex-wrap">
-                        {typeof result.risk_score === 'number' && (
-                          <span className="text-[10px] uppercase tracking-widest text-gray-500 font-mono">
-                            Risk <span className="text-white font-bold">{result.risk_score}</span>
-                          </span>
-                        )}
+                    {(result.severity_counts || typeof result.sla_hours === 'number') && (
+                      <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--kr-hairline-2)] pt-4">
                         {(['critical', 'major', 'minor'] as const).map((key) => {
                           const count = result.severity_counts?.[key];
                           if (!count) return null;
-                          return (
-                            <span
-                              key={key}
-                              className={`px-2 py-1 rounded border text-[10px] font-bold uppercase tracking-wider ${
-                                SEVERITY_BADGE[key.toUpperCase()]
-                              }`}
-                            >
-                              {count} {key}
-                            </span>
-                          );
+                          return <SeverityChip key={key} severity={key} count={count} />;
                         })}
                         {typeof result.sla_hours === 'number' && (
-                          <span className="text-[10px] uppercase tracking-widest text-gray-500 font-mono">
+                          <span className="kr-label ml-auto">
                             SLA{' '}
-                            <span className="text-white font-bold">
+                            <span className="kr-data text-kr-light">
                               {result.sla_hours === 0 ? 'IMMEDIATE' : `${result.sla_hours}h`}
                             </span>
                           </span>
                         )}
                       </div>
                     )}
-                  </div>
+                  </section>
 
-                  {/* -------- advisory banner (US) -------- */}
+                  {/* -------- governance -------- */}
                   {result.advisory_only && (
-                    <div className="flex items-start gap-3 rounded-lg border border-sky-500/30 bg-sky-950/20 px-4 py-3">
-                      <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
-                      <div className="space-y-1">
-                        <p className="text-sky-300 text-xs font-semibold uppercase tracking-wider">
+                    <section
+                      className="kr-verdict flex items-start gap-3 px-5 py-4"
+                      style={{ borderLeftColor: TONES.neutral.rule, background: 'var(--kr-info-dim)' }}
+                    >
+                      <Info
+                        className="mt-0.5 h-4 w-4 shrink-0"
+                        style={{ color: 'var(--kr-info)' }}
+                      />
+                      <div className="space-y-1.5">
+                        <p className="kr-eyebrow" style={{ color: 'var(--kr-info)' }}>
                           Advisory only · not a certification
                           {result.signoff_status ? ` · sign-off ${result.signoff_status}` : ''}
                         </p>
                         {result.scope_note && (
-                          <p className="text-sky-200/60 text-[11px] leading-relaxed">
+                          <p className="text-[11px] leading-relaxed text-kr-muted">
                             {result.scope_note}
                           </p>
                         )}
                       </div>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- impairment notice -------- */}
+                  {/* -------- impairment -------- */}
                   {result.impairment_suspected && result.impairment_notice && (
-                    <div className="rounded-lg border-2 border-red-500/50 bg-red-950/30 p-5">
-                      <h3 className="text-red-300 font-bold uppercase tracking-wider text-xs mb-3 flex items-center gap-2">
-                        <ShieldAlert className="w-4 h-4" />
+                    <section
+                      className="kr-verdict p-5"
+                      style={{ borderLeftColor: TONES.bad.rule, background: TONES.bad.fill }}
+                    >
+                      <h3
+                        className="kr-eyebrow flex items-center gap-2"
+                        style={{ color: TONES.bad.text }}
+                      >
+                        <ShieldAlert className="h-4 w-4" />
                         Suspected system impairment
                       </h3>
-                      <p className="text-red-200/70 text-xs leading-relaxed whitespace-pre-line">
+                      <p className="mt-3 whitespace-pre-line text-xs leading-relaxed text-kr-body">
                         {result.impairment_notice}
                       </p>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- info grid -------- */}
+                  {/* -------- facts -------- */}
                   <div className="grid grid-cols-2 gap-4">
-                    <InfoCell label="Site ID" value={result.site_id ?? siteId} />
-                    <InfoCell label="AI Confidence" value={result.confidence ?? '—'} />
-                    <InfoCell
-                      label="Equipment Type"
-                      value={result.equipment_type ?? '—'}
-                      small
-                    />
-                    <InfoCell label="Timestamp" value={timestamp} small />
+                    <Cell label="Site ID" value={result.site_id ?? siteId} />
+                    <Cell label="AI Confidence" value={result.confidence ?? '—'} />
+                    <Cell label="Equipment Type" value={result.equipment_type ?? '—'} small />
+                    <Cell label="Timestamp" value={timestamp} small />
                   </div>
 
-                  {/* -------- code basis (US) -------- */}
+                  {/* -------- code basis -------- */}
                   {result.code_basis?.fire_code && (
-                    <div className={`${CARD} p-6`} style={CARD_SHADOW}>
-                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4">
+                    <section className="kr-card p-6">
+                      <h3 className="kr-serif text-base tracking-[0.05em] text-kr-light">
                         Code Basis Applied
                       </h3>
-                      <dl className="space-y-3 text-xs">
+                      <dl className="mt-5 space-y-3.5 text-xs">
                         <BasisRow
                           label="Jurisdiction"
                           value={
@@ -750,95 +761,80 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                       </dl>
 
                       {result.code_basis.code_basis_confident === false && (
-                        <div className="flex items-start gap-2 mt-4 pt-4 border-t border-white/10">
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                          <p className="text-amber-300/80 text-[11px] leading-relaxed">
+                        <div className="mt-5 flex items-start gap-2 border-t border-[var(--kr-hairline-2)] pt-4">
+                          <AlertTriangle
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                            style={{ color: TONES.warn.text }}
+                          />
+                          <p className="text-[11px] leading-relaxed text-kr-muted">
                             No exact registry match for the requested jurisdiction — the model-code
                             baseline was applied. Confirm the adopted code and local amendments with
                             the AHJ before relying on any citation.
                           </p>
                         </div>
                       )}
-                    </div>
+                    </section>
                   )}
 
                   {/* -------- observations -------- */}
-                  <div className={`${CARD} p-6`} style={CARD_SHADOW}>
-                    <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4">
+                  <section className="kr-card p-6">
+                    <h3 className="kr-serif text-base tracking-[0.05em] text-kr-light">
                       Key Observations
                     </h3>
-                    <p className="text-gray-400 text-sm leading-relaxed">
+                    <p className="mt-4 text-sm leading-relaxed text-kr-body">
                       {result.observations || 'No observations returned.'}
                     </p>
-                  </div>
+                  </section>
 
-                  {/* -------- deficiencies (US) -------- */}
+                  {/* -------- deficiencies -------- */}
                   {deficiencies.length > 0 && (
-                    <div
-                      className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10"
-                      style={CARD_SHADOW}
-                    >
-                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-5 flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse drop-shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
-                        Deficiencies · {deficiencies.length}
+                    <section className="kr-card p-6">
+                      <h3 className="kr-serif text-base tracking-[0.05em] text-kr-light">
+                        Deficiencies{' '}
+                        <span className="kr-data text-sm text-kr-muted">
+                          ({deficiencies.length})
+                        </span>
                       </h3>
-                      <ul className="space-y-5">
+                      <ul className="mt-5 space-y-6">
                         {deficiencies.map((d, i) => {
                           const severity = (d.severity ?? 'MAJOR').toUpperCase();
                           return (
                             <li
                               key={d.code ?? i}
-                              className="border-l-2 border-white/10 pl-4 space-y-2"
+                              className="space-y-2 border-l-2 pl-4"
+                              style={{
+                                borderLeftColor: SEVERITY_COLOR[severity] ?? SEVERITY_COLOR.MAJOR,
+                              }}
                             >
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span
-                                  className={`px-2 py-0.5 rounded border text-[10px] font-bold uppercase tracking-wider ${
-                                    SEVERITY_BADGE[severity] ?? SEVERITY_BADGE.MAJOR
-                                  }`}
-                                >
-                                  {severity}
-                                </span>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <SeverityChip severity={severity} />
                                 {d.code && (
-                                  <span className="text-[10px] font-mono text-gray-500 uppercase tracking-wider">
+                                  <span className="kr-data text-[10px] uppercase tracking-[0.14em] text-kr-muted">
                                     {d.code}
                                   </span>
                                 )}
                                 {d.verification_needed && (
-                                  <span className="text-[10px] font-mono text-amber-400/70 uppercase tracking-wider">
+                                  <span
+                                    className="kr-data text-[10px] uppercase tracking-[0.14em]"
+                                    style={{ color: TONES.warn.text }}
+                                  >
                                     needs field verification
                                   </span>
                                 )}
                               </div>
 
                               {d.finding && (
-                                <p className="text-gray-300 text-sm leading-relaxed">{d.finding}</p>
+                                <p className="text-sm leading-relaxed text-kr-body">{d.finding}</p>
                               )}
-                              {d.observed && (
-                                <p className="text-gray-500 text-xs leading-relaxed">
-                                  <span className="text-gray-600 uppercase tracking-wider text-[10px]">
-                                    Observed ·{' '}
-                                  </span>
-                                  {d.observed}
-                                </p>
-                              )}
-                              {d.requirement && (
-                                <p className="text-gray-500 text-xs leading-relaxed">
-                                  <span className="text-gray-600 uppercase tracking-wider text-[10px]">
-                                    Requirement ·{' '}
-                                  </span>
-                                  {d.requirement}
-                                </p>
-                              )}
-                              {d.remediation && (
-                                <p className="text-emerald-300/70 text-xs leading-relaxed">
-                                  <span className="text-emerald-600/70 uppercase tracking-wider text-[10px]">
-                                    Remediation ·{' '}
-                                  </span>
-                                  {d.remediation}
-                                </p>
-                              )}
+                              <Detail label="Observed" value={d.observed} />
+                              <Detail label="Requirement" value={d.requirement} />
+                              <Detail
+                                label="Remediation"
+                                value={d.remediation}
+                                color="var(--kr-pass)"
+                              />
                               {d.code_reference && (
-                                <p className="text-amber-400/60 text-[11px] font-mono">
+                                <p className="kr-data text-[11px] text-kr-gold opacity-80">
                                   {d.code_reference}
                                 </p>
                               )}
@@ -846,100 +842,102 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                           );
                         })}
                       </ul>
-                      <p className="text-gray-600 text-[10px] leading-relaxed mt-5 pt-4 border-t border-white/10">
+                      <p className="mt-6 border-t border-[var(--kr-hairline-2)] pt-4 text-[10px] leading-relaxed text-kr-muted">
                         Clause numbers are model-generated pointers for a human reviewer, not
                         authority. Verify against the edition your AHJ has adopted.
                       </p>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- flat violations (India, or US with no structured
-                       deficiencies) -------- */}
+                  {/* -------- flat violations (India) -------- */}
                   {deficiencies.length === 0 && violations.length > 0 && (
-                    <div
-                      className="glass rounded-lg p-6 border-2 border-red-500/30 bg-red-950/10"
-                      style={CARD_SHADOW}
-                    >
-                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-4 flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse drop-shadow-[0_0_6px_rgba(248,113,113,0.8)]" />
+                    <section className="kr-card p-6">
+                      <h3 className="kr-serif text-base tracking-[0.05em] text-kr-light">
                         Violations Detected
                       </h3>
-                      <ul className="space-y-3">
+                      <ul className="mt-4 space-y-3">
                         {violations.map((v, i) => (
                           <li key={i} className="flex items-start gap-3">
-                            <span className="text-red-400 font-bold text-lg leading-none">•</span>
-                            <span className="text-gray-400 text-sm">{v}</span>
+                            <span
+                              className="mt-[7px] h-1 w-1 shrink-0 rounded-full"
+                              style={{ background: TONES.bad.rule }}
+                            />
+                            <span className="text-sm leading-relaxed text-kr-body">{v}</span>
                           </li>
                         ))}
                       </ul>
-                    </div>
+                    </section>
                   )}
 
                   {/* -------- clean -------- */}
                   {!hasFindings && (
-                    <div
-                      className="glass rounded-lg p-6 border-2 border-emerald-500/30 bg-emerald-950/10"
-                      style={CARD_SHADOW}
+                    <section
+                      className="kr-verdict p-6"
+                      style={{ borderLeftColor: TONES.good.rule, background: TONES.good.fill }}
                     >
-                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-2 flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse drop-shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
-                        Zero Violations
+                      <h3 className="kr-eyebrow" style={{ color: TONES.good.text }}>
+                        No deficiencies observed
                       </h3>
-                      {/* Was hardcoded NBC 2016 / CFO Mumbai copy. */}
-                      <p className="text-gray-400 text-sm">
+                      <p className="mt-2.5 text-sm leading-relaxed text-kr-body">
                         {result.code_basis?.fire_code
-                          ? `No deficiencies visible against ${result.code_basis.fire_code}.`
+                          ? `Nothing visible against ${result.code_basis.fire_code}.`
                           : regionDef.compliantCopyFallback}
                       </p>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- unverifiable items (US) -------- */}
+                  {/* -------- unverifiable -------- */}
                   {unverifiable.length > 0 && (
-                    <div className={`${CARD} p-6`} style={CARD_SHADOW}>
-                      <h3 className="text-white font-bold uppercase tracking-wider text-sm mb-2">
+                    <section className="kr-card p-6">
+                      <h3 className="kr-serif text-base tracking-[0.05em] text-kr-light">
                         Cannot be verified from a photograph
                       </h3>
-                      <p className="text-gray-600 text-[11px] mb-4">
-                        The honest boundary of this automated pass. These require a physical
+                      <p className="mt-2 text-[11px] text-kr-muted">
+                        The evidentiary boundary of this automated pass. These require a physical
                         inspection.
                       </p>
-                      <ul className="space-y-2">
+                      <ul className="mt-4 space-y-2.5">
                         {unverifiable.map((item, i) => (
                           <li key={i} className="flex items-start gap-3">
-                            <span className="text-gray-600 text-lg leading-none">–</span>
-                            <span className="text-gray-500 text-xs leading-relaxed">{item}</span>
+                            <span className="mt-2 h-px w-2.5 shrink-0 bg-[var(--kr-gold)] opacity-60" />
+                            <span className="text-xs leading-relaxed text-kr-muted">{item}</span>
                           </li>
                         ))}
                       </ul>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- reinspect reasons -------- */}
-                  {result.reinspect_required && asArray<string>(result.reinspect_reasons).length > 0 && (
-                    <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-5">
-                      <h3 className="text-amber-300 font-bold uppercase tracking-wider text-xs mb-3 flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4" />
+                  {/* -------- reinspect -------- */}
+                  {result.reinspect_required && reinspectReasons.length > 0 && (
+                    <section
+                      className="kr-verdict p-5"
+                      style={{ borderLeftColor: TONES.warn.rule, background: TONES.warn.fill }}
+                    >
+                      <h3
+                        className="kr-eyebrow flex items-center gap-2"
+                        style={{ color: TONES.warn.text }}
+                      >
+                        <AlertTriangle className="h-4 w-4" />
                         Re-inspection required
                       </h3>
-                      <ul className="space-y-2">
-                        {asArray<string>(result.reinspect_reasons).map((reason, i) => (
-                          <li key={i} className="text-amber-200/70 text-xs leading-relaxed">
-                            • {reason}
+                      <ul className="mt-3 space-y-2">
+                        {reinspectReasons.map((reason, i) => (
+                          <li key={i} className="text-xs leading-relaxed text-kr-body">
+                            {reason}
                           </li>
                         ))}
                       </ul>
-                    </div>
+                    </section>
                   )}
 
-                  {/* -------- trace footer -------- */}
+                  {/* -------- trace -------- */}
                   {(result.audit_id || result.model_used) && (
-                    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-2 text-[10px] font-mono text-gray-700 uppercase tracking-wider">
+                    <div className="kr-data flex flex-wrap items-center gap-x-5 gap-y-2 px-1 text-[10px] uppercase tracking-[0.14em] text-kr-muted/60">
                       {result.audit_id && <span>{result.audit_id}</span>}
                       {result.model_used && <span>{result.model_used}</span>}
                       {typeof result.latency_ms === 'number' && <span>{result.latency_ms}ms</span>}
                       {result.persisted === false && (
-                        <span className="text-amber-500/70">not persisted</span>
+                        <span style={{ color: TONES.warn.text }}>not persisted</span>
                       )}
                     </div>
                   )}
@@ -950,35 +948,52 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                       setFile(null);
                       setPreview(null);
                     }}
-                    className="w-full h-12 font-bold uppercase tracking-wider text-xs rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 hover:bg-amber-500/10 hover:border-amber-400/50 transition-all duration-300"
+                    className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
                   >
-                    NEW AUDIT
+                    New audit
                   </Button>
                 </div>
               )}
             </div>
           </div>
+
+          <footer className="mt-16 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--kr-hairline)] pt-6">
+            <p className="kr-label">
+              {BRAND.companyFull} · {BRAND.productName}
+            </p>
+            <p className="kr-label">Advisory screening · not a certified inspection</p>
+          </footer>
         </div>
       </div>
     </div>
   );
 }
 
-function InfoCell({
-  label,
-  value,
-  small,
-}: {
-  label: string;
-  value: string;
-  small?: boolean;
-}) {
+// ---------------------------------------------------------------------------
+
+function SeverityChip({ severity, count }: { severity: string; count?: number }) {
+  const key = severity.toUpperCase();
+  const color = SEVERITY_COLOR[key] ?? SEVERITY_COLOR.MAJOR;
+  const style: CSSProperties = {
+    color,
+    borderColor: color,
+    background: 'transparent',
+  };
   return (
-    <div className={`${CARD} p-5`} style={CARD_SHADOW}>
-      <p className="text-xs uppercase tracking-wider text-amber-600/60 font-semibold">{label}</p>
-      <p className={`text-white font-bold mt-3 font-mono ${small ? 'text-sm' : 'text-lg'}`}>
-        {value}
-      </p>
+    <span
+      className="rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
+      style={style}
+    >
+      {count !== undefined ? `${count} ${key}` : key}
+    </span>
+  );
+}
+
+function Cell({ label, value, small }: { label: string; value: string; small?: boolean }) {
+  return (
+    <div className="kr-card p-5">
+      <p className="kr-label">{label}</p>
+      <p className={`kr-data mt-3 text-kr-light ${small ? 'text-sm' : 'text-lg'}`}>{value}</p>
     </div>
   );
 }
@@ -986,12 +1001,20 @@ function InfoCell({
 function BasisRow({ label, value }: { label: string; value?: string }) {
   if (!value) return null;
   return (
-    <div className="grid grid-cols-[88px_1fr] gap-3">
-      <dt className="text-[10px] uppercase tracking-widest text-amber-600/60 font-semibold pt-0.5">
-        {label}
-      </dt>
-      <dd className="text-gray-400 leading-relaxed">{value}</dd>
+    <div className="grid grid-cols-[92px_1fr] gap-3">
+      <dt className="kr-label pt-0.5">{label}</dt>
+      <dd className="leading-relaxed text-kr-body">{value}</dd>
     </div>
+  );
+}
+
+function Detail({ label, value, color }: { label: string; value?: string; color?: string }) {
+  if (!value) return null;
+  return (
+    <p className="text-xs leading-relaxed" style={{ color: color ?? 'var(--kr-muted)' }}>
+      <span className="kr-label">{label} · </span>
+      {value}
+    </p>
   );
 }
 
