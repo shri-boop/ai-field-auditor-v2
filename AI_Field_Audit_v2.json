@@ -365,52 +365,6 @@
       "disabled": true
     }
   ],
-  "pinData": {
-    "Webhook": [
-      {
-        "json": {
-          "headers": {
-            "host": "n8n.arvamisolutionz.com",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
-            "content-length": "136",
-            "accept": "*/*",
-            "accept-encoding": "gzip, br",
-            "accept-language": "en-US,en;q=0.9",
-            "cdn-loop": "cloudflare; loops=1",
-            "cf-connecting-ip": "223.181.56.146",
-            "cf-ipcountry": "IN",
-            "cf-ray": "a10be7118e0cc570-MRS",
-            "cf-visitor": "{\"scheme\":\"https\"}",
-            "content-type": "application/json",
-            "origin": "https://ai-field-auditor-v2-uga1.vercel.app",
-            "priority": "u=1, i",
-            "referer": "https://ai-field-auditor-v2-uga1.vercel.app/",
-            "sec-ch-ua": "\"Google Chrome\";v=\"149\", \"Chromium\";v=\"149\", \"Not)A;Brand\";v=\"24\"",
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": "\"Windows\"",
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "cross-site",
-            "via": "2.0 Caddy",
-            "x-forwarded-for": "162.159.122.166",
-            "x-forwarded-host": "n8n.arvamisolutionz.com",
-            "x-forwarded-proto": "https"
-          },
-          "params": {},
-          "query": {},
-          "body": {
-            "image_url": "https://6tm3ilznpjpkygcc.public.blob.vercel-storage.com/1782305889054-fire_extinguisher_bad.png",
-            "site_id": "SITE-MUM-401"
-          },
-          "webhookUrl": "https://n8n.arvamisolutionz.com/webhook/audit-field-photov2",
-          "executionMode": "production"
-        },
-        "pairedItem": {
-          "item": 0
-        }
-      }
-    ]
-  },
   "connections": {
     "Webhook": {
       "main": [
