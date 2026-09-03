@@ -321,88 +321,79 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
     <div className="relative min-h-screen">
       <div className="relative z-10 px-6 py-10 sm:px-10">
         <div className="mx-auto max-w-7xl">
-          {/* ===================== MASTHEAD ===================== */}
-          <header className="mb-12 flex flex-wrap items-end justify-between gap-6 border-b border-[var(--kr-hairline)] pb-7">
+          {/* ===================== MASTHEAD =====================
+              Three zones: company lockup, code region, product wordmark. The
+              region control lives here rather than in the input column because
+              it is not an input — it selects which engine and which code basis
+              the whole screen is operating under, so it belongs with identity.
+              Moving it up also lets the form start immediately. */}
+          <header className="mb-8 flex flex-wrap items-center justify-between gap-x-8 gap-y-6 border-b border-[var(--kr-hairline)] pb-6">
             <div className="flex items-center gap-4">
               <Image
                 src={BRAND.markSrc}
                 alt=""
-                width={52}
-                height={52}
+                width={76}
+                height={76}
                 priority
-                className="h-[52px] w-[52px] shrink-0"
+                className="h-[76px] w-[76px] shrink-0"
               />
               <div>
-                <div className="kr-wordmark text-[19px] leading-none">
+                <div className="kr-wordmark text-[21px] leading-none">
                   {BRAND.companyFirst} <em>{BRAND.companySecond}</em>
                 </div>
-                <div className="mt-[7px] h-px w-full bg-[var(--kr-gold)] opacity-45" />
-                <div className="kr-tagline mt-[7px]">{BRAND.tagline}</div>
+                <div className="mt-2 h-px w-full bg-[var(--kr-gold)] opacity-45" />
+                <div className="kr-tagline mt-2">{BRAND.tagline}</div>
               </div>
             </div>
 
+            {/* Rendered only when this deployment permits more than one region;
+                a single-region deployment shows a static label instead, so a
+                customer never learns the other jurisdiction exists. */}
+            {showRegionSwitch ? (
+              <div className="flex flex-col items-center gap-2">
+                <div className="kr-seg" role="group" aria-label="Code region">
+                  {enabledRegions.map((key) => {
+                    const active = key === region;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        data-active={active}
+                        aria-pressed={active}
+                        className="kr-seg-item"
+                        onClick={() => {
+                          if (key === region) return;
+                          setRegion(key);
+                          resetOutput();
+                        }}
+                      >
+                        {REGIONS[key].label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <span className="text-[10px] tracking-wide text-kr-muted">
+                  {regionDef.codeLabel}
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-1.5">
+                <span className="kr-eyebrow">{regionDef.label}</span>
+                <span className="text-[10px] tracking-wide text-kr-muted">
+                  {regionDef.codeLabel}
+                </span>
+              </div>
+            )}
+
             <div className="text-right">
-              <h1 className="kr-serif text-[26px] leading-none tracking-[0.1em] text-kr-light">
-                {BRAND.productName}
-              </h1>
-              <p className="kr-label mt-2">{BRAND.productDescriptor}</p>
+              <h1 className="kr-script text-[44px]">{BRAND.productWordmark}</h1>
+              <p className="kr-label mt-1">{BRAND.productDescriptor}</p>
             </div>
           </header>
 
           <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
             {/* ===================== INPUTS ===================== */}
-            <div className="space-y-7">
-              {/* Region. Rendered only when this deployment permits more than
-                  one; a single-region deployment shows a static label so a
-                  customer never sees the other jurisdiction exists. */}
-              {showRegionSwitch ? (
-                <section className="space-y-3">
-                  <span className="kr-eyebrow">Code Region</span>
-                  <div className="grid grid-cols-2 gap-2">
-                    {enabledRegions.map((key) => {
-                      const def = REGIONS[key];
-                      const active = key === region;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => {
-                            if (key === region) return;
-                            setRegion(key);
-                            resetOutput();
-                          }}
-                          className={`rounded-md px-4 py-3 text-left transition-all duration-200 ${
-                            active ? 'kr-action' : 'kr-card-quiet hover:border-[var(--kr-gold-deep)]'
-                          }`}
-                        >
-                          <span
-                            className={`block text-[13px] font-semibold uppercase tracking-[0.14em] ${
-                              active ? '' : 'text-kr-light'
-                            }`}
-                          >
-                            {def.label}
-                          </span>
-                          <span
-                            className={`mt-1 block text-[10px] tracking-wide ${
-                              active ? 'opacity-70' : 'text-kr-muted'
-                            }`}
-                          >
-                            {def.codeLabel}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="h-1 w-1 rounded-full bg-[var(--kr-gold)]" />
-                  <span className="kr-label">
-                    {regionDef.label} · {regionDef.codeLabel}
-                  </span>
-                </div>
-              )}
-
+            <div className="space-y-6">
               <section className="space-y-3">
                 <label htmlFor="site-id" className="kr-eyebrow block">
                   Site ID / Location Code
