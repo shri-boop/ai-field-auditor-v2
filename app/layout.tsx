@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Fraunces, Hanken_Grotesk, JetBrains_Mono } from 'next/font/google';
+import { Cormorant_Garamond, Fraunces, Hanken_Grotesk, JetBrains_Mono } from 'next/font/google';
 import { Analytics } from '@vercel/analytics/next';
 import { BRAND, PRODUCT_LOCKUP } from '@/lib/brand';
 import './globals.css';
@@ -24,6 +24,26 @@ const hanken = Hanken_Grotesk({
 const jetbrains = JetBrains_Mono({
   subsets: ['latin'],
   variable: '--font-jetbrains',
+  display: 'swap',
+});
+
+/**
+ * Script face for the product wordmark only.
+ *
+ * Cormorant Garamond italic rather than a true copperplate script (Pinyon,
+ * Italianno, Great Vibes): those are hairline-thin, and gold hairlines on ink at
+ * this size lose legibility badly — plus a wedding-invitation script sitting
+ * beside "fire code compliance" undercuts the credibility the rest of this
+ * design is buying. Cormorant italic is calligraphic and clearly cursive in
+ * feel, while holding enough stroke weight to read at a glance.
+ *
+ * Swap target if you want it more overtly script: replace this one import.
+ */
+const cormorant = Cormorant_Garamond({
+  subsets: ['latin'],
+  weight: ['500', '600'],
+  style: ['italic'],
+  variable: '--font-cormorant',
   display: 'swap',
 });
 
@@ -52,7 +72,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${fraunces.variable} ${hanken.variable} ${jetbrains.variable}`}
+      className={`${fraunces.variable} ${hanken.variable} ${jetbrains.variable} ${cormorant.variable}`}
     >
       <body className="font-sans antialiased">
         {children}

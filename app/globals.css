@@ -95,6 +95,7 @@
   --font-sans: var(--font-hanken), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-fraunces), Georgia, 'Times New Roman', serif;
   --font-mono: var(--font-jetbrains), ui-monospace, Menlo, Consolas, monospace;
+  --font-script: var(--font-cormorant), Georgia, serif;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -297,6 +298,60 @@
     letter-spacing: 0.34em;
     text-transform: uppercase;
     color: #b3a988;
+  }
+
+  /* Product wordmark. Calligraphic and set in gold; the descriptor beneath stays
+     in the clinical label style deliberately, so the flourish lands on the NAME
+     while the thing it does still reads as instrumentation. */
+  .kr-script {
+    font-family: var(--font-cormorant), Georgia, serif;
+    font-style: italic;
+    font-weight: 600;
+    letter-spacing: 0.005em;
+    line-height: 0.95;
+    background: linear-gradient(160deg, #e6cf9a 0%, var(--kr-gold) 42%, var(--kr-gold-deep) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--kr-gold);
+  }
+
+  /* ---- header region switch --------------------------------------------- */
+
+  /* Segmented pill. Active state is a raised ink surface plus gold text rather
+     than a colour fill: gold stays structural, and the action orange stays
+     reserved for the audit button so nothing competes with it. */
+  .kr-seg {
+    display: inline-flex;
+    padding: 3px;
+    border: 1px solid var(--kr-hairline);
+    border-radius: 999px;
+    background: var(--kr-ink-2);
+    background: color-mix(in srgb, var(--kr-ink-2) 80%, transparent);
+  }
+
+  .kr-seg-item {
+    border-radius: 999px;
+    padding: 6px 18px;
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--kr-muted);
+    transition:
+      color 0.18s ease,
+      background-color 0.18s ease;
+  }
+  .kr-seg-item:hover:not([data-active='true']) {
+    color: var(--kr-light);
+  }
+  .kr-seg-item[data-active='true'] {
+    background: var(--kr-ink-3);
+    color: var(--kr-gold);
+    box-shadow:
+      0 1px 0 rgba(239, 234, 224, 0.05) inset,
+      0 2px 10px -6px rgba(0, 0, 0, 0.9);
   }
 
   /* ---- controls -------------------------------------------------------- */

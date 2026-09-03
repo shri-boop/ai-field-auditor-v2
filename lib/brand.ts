@@ -25,6 +25,15 @@ export const BRAND = {
 
   /** Product name. See the note above before changing. */
   productName: 'AQUILA',
+
+  /**
+   * Title case, for the script wordmark. Script faces have no real uppercase —
+   * setting a calligraphic face in all caps breaks the letter joins and reads as
+   * a mistake — so the display form is stored separately rather than derived
+   * from productName with text-transform.
+   */
+  productWordmark: 'Aquila',
+
   productDescriptor: 'Fire Compliance',
 
   /** Logomark. Effectively transparent, so it composites onto ink with no seam. */
