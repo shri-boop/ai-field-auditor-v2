@@ -394,6 +394,15 @@
     box-shadow: 0 0 0 3px rgba(201, 163, 91, 0.12);
   }
 
+  /* ---- print visibility ------------------------------------------------- */
+
+  /* Report furniture that only makes sense on paper: the document header block,
+     the evidence plate and the sign-off panel. The @media print block flips
+     these to visible. */
+  .kr-print-only {
+    display: none;
+  }
+
   /* ---- motion ---------------------------------------------------------- */
 
   .kr-sweep {
@@ -427,5 +436,154 @@
     .kr-spin {
       animation: none;
     }
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   PRINT / SAVE AS PDF
+   ---------------------------------------------------------------------------
+   The screen is deep ink and gold. That is wrong on paper for two reasons: it
+   floods a printer with toner, and an inspection record is a document — it has
+   to read as one when it lands on a fire marshal's desk or an insurer's file.
+
+   Rather than maintain a parallel print layout, this re-points the --kr-*
+   tokens to a light document palette. Every rule in this file already reads
+   from those tokens, so the whole interface inverts in one place and nothing
+   can be forgotten. Only the handful of effects that cannot survive on paper
+   (gradients, glows, backdrop texture, text-clipped gradients) need explicit
+   overrides below.
+
+   Colours are darkened rather than merely un-inverted: gold at #c9a35b on white
+   is close to illegible, and the verdict hues are deepened so CRITICAL still
+   reads as grave in a photocopy.
+   --------------------------------------------------------------------------- */
+
+@media print {
+  :root {
+    --kr-ink: #ffffff;
+    --kr-ink-2: #ffffff;
+    --kr-ink-3: #f4f2ee;
+    --kr-gold: #7a6127;
+    --kr-gold-soft: #7a6127;
+    --kr-gold-deep: #5f4b1e;
+    --kr-light: #14120d;
+    --kr-body: #23201a;
+    --kr-muted: #555046;
+    --kr-hairline: rgba(0, 0, 0, 0.28);
+    --kr-hairline-2: rgba(0, 0, 0, 0.14);
+
+    --kr-pass: #1f6b3d;
+    --kr-pass-dim: transparent;
+    --kr-warn: #8a5f10;
+    --kr-warn-dim: transparent;
+    --kr-fail: #8e2420;
+    --kr-fail-dim: transparent;
+    --kr-info: #2d4d61;
+    --kr-info-dim: transparent;
+
+    --kr-critical: #8e2420;
+    --kr-major: #8a4a12;
+    --kr-minor: #3f4b57;
+  }
+
+  @page {
+    size: A4;
+    margin: 14mm 14mm 16mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #23201a;
+  }
+
+  /* Kill the atmosphere: warm pools and the feTurbulence grain. */
+  body::before,
+  body::after {
+    display: none !important;
+  }
+
+  .kr-screen-only {
+    display: none !important;
+  }
+
+  .kr-print-only {
+    display: block !important;
+  }
+
+  /* The report is the whole page when printing. */
+  .kr-report-grid {
+    display: block !important;
+  }
+
+  /* Surfaces become ruled blocks, not floating glass. */
+  .kr-card,
+  .kr-card-quiet {
+    background: #ffffff !important;
+    border: 1px solid rgba(0, 0, 0, 0.24) !important;
+    box-shadow: none !important;
+    border-radius: 4px !important;
+  }
+
+  .kr-verdict {
+    background: #ffffff !important;
+    border: 1px solid rgba(0, 0, 0, 0.24) !important;
+    border-left-width: 4px !important;
+    box-shadow: none !important;
+    border-radius: 4px !important;
+  }
+
+  /* A gradient clipped to text prints as nothing at all. */
+  .kr-script {
+    background: none !important;
+    -webkit-text-fill-color: #5f4b1e !important;
+    color: #5f4b1e !important;
+  }
+
+  .kr-action,
+  .kr-ghost {
+    box-shadow: none !important;
+    background: none !important;
+  }
+
+  /* Keep deliberate colour: severity and verdict rules must survive the driver's
+     "economy mode" heuristics, or a CRITICAL badge prints as a bare outline. */
+  .kr-severity-chip,
+  .kr-verdict,
+  .kr-deficiency {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Never split a finding, a fact cell or the code basis across a page break —
+     half a deficiency on the next sheet is how a remediation gets missed. */
+  section,
+  li,
+  .kr-card,
+  .kr-verdict,
+  .kr-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  h1,
+  h2,
+  h3 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  /* Evidence photo: cap it so it never eats a whole sheet. */
+  .kr-evidence img {
+    max-height: 78mm !important;
+    width: auto !important;
+    object-fit: contain !important;
+    border: 1px solid rgba(0, 0, 0, 0.24);
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
   }
 }
