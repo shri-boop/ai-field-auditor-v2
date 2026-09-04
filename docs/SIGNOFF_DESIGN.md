@@ -53,7 +53,7 @@ The answer is both, and the "both" is the important part.
 | Credential type | see §3 — a technician certificate and a firesafety inspector certification are not interchangeable |
 | Credential number | as issued |
 | Issuing authority | Florida SFM, NICET, state fire marshal of another state |
-| Expiry date | the control that matters — see §4 |
+| Expiry date | the control that matters — see §5 |
 | Company licence number | organisation-level; Florida licenses the *dealer*, not just the individual |
 
 Typed per sign-off it would be mistyped, never validated, and impossible to query.
@@ -72,30 +72,134 @@ is deliberate.
 
 ---
 
-## 3. Credential types Florida actually cares about
+## 3. Credentials are jurisdiction-scoped from day one
 
-Not free text. An enumeration, because the type determines what the signature can
-support:
+**Decision made.** This resolves what was open question §12.4.
 
-| Type | Basis | Can `FIELD_VERIFIED`? |
-|---|---|---|
-| `FIRESAFETY_INSPECTOR` | certified under **s. 633.216, F.S.** | Yes — including statutory firesafety inspections |
-| `FIRE_EQUIPMENT_TECHNICIAN` | individual permit under Ch. 633, Part V | Yes, for equipment within the permit class |
-| `NICET_LEVEL_II` … `IV` | NICET certification | Yes, per level and subfield |
-| `TRAINED_PERSON` | NFPA 10 "trained person" | Desk review only |
-| `UNCREDENTIALED` | none recorded | Desk review only |
+A credential is not a type. It is a **(jurisdiction, type, number, expiry)** tuple,
+because US fire protection licensing is genuinely per-state and nothing about it
+converges:
 
-The last two are the honest default. Someone with no recorded credential can still
-triage, and the record will say exactly that.
+| State | Who licenses, and what |
+|---|---|
+| Florida | State Fire Marshal — fire equipment dealer permits by class; individual technician permits; firesafety inspectors certified under **s. 633.216, F.S.** |
+| California | **OSFM** licenses extinguisher servicing companies and technicians (Title 19 CCR); CSLB issues the C-16 fire protection contractor licence |
+| Texas | **TDI** State Fire Marshal's Office licenses extinguisher and alarm contractors, and individual technicians |
+| New York City | **FDNY Certificate of Fitness** — a distinct instrument, not a state licence |
+| Massachusetts | Department of Fire Services, under 527 CMR |
 
-**Company licence matters separately.** Florida licenses fire equipment dealers by
-class (A/B/C/D) by equipment type. A technician's signature on a suppression system
-means little if the company holds no permit covering it, so the company licence is
-snapshotted alongside.
+Against that, two credentials are **portable across states**: NICET certification
+(Levels I–IV, by subfield) and NFPA "trained person" status, which is not a licence
+at all.
+
+### This mirrors a decision already made in this codebase
+
+`RESOLVE_CodeBasis` treats jurisdiction as **data in a registry** rather than
+branching logic, specifically so that "adding a jurisdiction is a registry edit — no
+prompt rewriting, no re-testing of the audit logic" (US doc §1). The credential model
+takes the identical shape for the identical reason.
+
+Concretely, it **reuses the same jurisdiction keys** — `FL`, `CA`, `TX`, `NY`,
+`NY-NYC`, `MA`, `WA`, `IL-CHICAGO`, `US-DEFAULT` — rather than inventing a parallel
+vocabulary. That is what makes §4's jurisdiction-match check possible at all: one
+vocabulary across code basis and credentials, so the two can be compared without
+translation.
+
+Two additions to that key set:
+
+- `US-NICET` — a pseudo-jurisdiction for portable certifications
+- `NONE` — no credential recorded, which is an honest state, not an error
+
+### `CREDENTIAL_REGISTRY`
+
+A registry file mirroring `CODE_BASIS_REGISTRY`, carrying the same honesty flags it
+does — `verified_on`, and a per-entry `requires_confirmation`:
+
+```
+FL:
+  authority: 'Florida State Fire Marshal (Division of State Fire Marshal)'
+  types:
+    FIRESAFETY_INSPECTOR       s. 633.216, F.S.        field_verify: yes
+    FIRE_EQUIPMENT_TECHNICIAN  Ch. 633 Part V permit   field_verify: yes, within permit class
+  company_licence: 'Fire equipment dealer permit, Class A/B/C/D by equipment type'
+  accepts_nicet: false          # unverified — see below
+  verified_on: '2026-09-04'
+  requires_confirmation: false
+
+US-NICET:
+  authority: 'NICET'
+  types:
+    NICET_II / III / IV        by subfield             field_verify: per §4
+  portable: true
+
+CA, TX, NY-NYC, MA, WA, IL-CHICAGO:
+  seeded as STUBS with requires_confirmation: true
+```
+
+**Only Florida is seeded as verified**, because Florida is the target market and its
+statute has been read. The others are stubs flagged
+`requires_confirmation: true` — exactly the discipline already applied to standard
+editions, where everything except NFPA 10 (2022) carries
+`edition_verified: false` and is surfaced to reviewers rather than silently asserted.
+
+Fabricating California's licensing rules to make a table look complete would be the
+single most dangerous thing in this document.
+
+### Company licence is separate and also jurisdiction-scoped
+
+Florida licenses the **dealer**, by class, by equipment type. A technician's
+signature on a kitchen suppression system means little if the company holds no
+permit covering it. So the company licence is a jurisdiction-scoped credential in its
+own right, snapshotted alongside the individual's.
 
 ---
 
-## 4. Refuse to sign on an expired credential
+## 4. The check this makes possible — and why clients will pay for it
+
+Because the audit already resolves a jurisdiction into
+`code_basis.jurisdiction_resolved`, and credentials now carry a jurisdiction in the
+**same vocabulary**, the system can ask a question no spreadsheet can:
+
+> *Is this person credentialed in the jurisdiction this audit was judged against?*
+
+Three outcomes:
+
+| Signer's credential | Result |
+|---|---|
+| Matches the audit's jurisdiction, unexpired | `FIELD_VERIFIED` available |
+| Portable (NICET) or out-of-state, unexpired | `FIELD_VERIFIED` only if the registry records that the jurisdiction accepts it — otherwise `DESK_REVIEW` |
+| Expired, or `NONE` | `DESK_REVIEW` only (and see §5 — expired is blocked) |
+
+So the product can say, on screen and on paper:
+
+> *This audit was judged under the Florida Fire Prevention Code (FFPC), 8th Edition.
+> The signer holds a California OSFM licence. Field verification is unavailable;
+> recorded as desk review.*
+
+**That is the wedge.** The good customers are multi-state contractors — two hundred
+technicians across five states, a real compliance budget, and a problem nobody
+solves well: *which of my people may sign in which state, and whose licence lapses
+next month?* Inspect Point, BuildingReports and ServiceTrade concentrate on the
+inspection form. None of them governs the credential behind the signature.
+
+A licence-expiry dashboard is worth paying for on its own. Credential-aware sign-off
+is a reason to switch.
+
+### Why not defer this
+
+The marginal cost today is one column and one registry file. Deferred, it is
+unrecoverable for anything already signed — a signature stored without the
+jurisdiction it was made in cannot have one inferred later.
+
+This project has already met that exact wall once: migration 003 added `image_url`
+to the India table, and the two existing `SITE-BAN-502` records have no evidence
+photograph and never will, because the value was never captured. Signed records are
+append-only by §5, so the same mistake there would be permanent and would sit inside
+the legally meaningful part of the product.
+
+---
+
+## 5. Refuse to sign on an expired credential
 
 The single most valuable control in this whole design.
 
@@ -111,7 +215,7 @@ year of records signed under a lapsed certificate.
 
 ---
 
-## 5. Append-only. A signature is never edited or deleted
+## 6. Append-only. A signature is never edited or deleted
 
 Two things must both be true: nothing is silently overwritten, and mistakes can be
 corrected. That means a history table, not mutable columns.
@@ -130,7 +234,7 @@ credential_no   text        -- snapshot
 credential_expiry date      -- snapshot: what it was AT SIGNING
 company_licence text        -- snapshot
 attestation     text        -- the verbatim wording agreed to
-reason_code     text        -- rejections only, see §6
+reason_code     text        -- rejections only, see §7
 notes           text
 superseded_by   bigint      -- self-reference
 created_at      timestamptz DEFAULT now()
@@ -160,7 +264,7 @@ live signatures on the same device.
 
 ---
 
-## 6. Rejection is a first-class outcome, with a reason code
+## 7. Rejection is a first-class outcome, with a reason code
 
 The model will be wrong. A technician must be able to say so, and that disagreement
 is valuable in two directions.
@@ -186,7 +290,7 @@ Free-text notes are always available; the code is what makes it queryable.
 
 ---
 
-## 7. Bulk sign-off: yes, but never for CRITICAL
+## 8. Bulk sign-off: yes, but never for CRITICAL
 
 An owner needs to clear thirty clean screenings without thirty clicks. An owner
 must also never be able to rubber-stamp a blocked fire exit.
@@ -198,7 +302,7 @@ must also never be able to rubber-stamp a blocked fire exit.
 
 ---
 
-## 8. The pending queue is the owner's screen
+## 9. The pending queue is the owner's screen
 
 An audit sitting `PENDING` is an unresolved liability. `v_faus_awaiting_signoff`
 already exists in migration 001 for this.
@@ -210,7 +314,7 @@ one.
 
 ---
 
-## 9. Roles
+## 10. Roles
 
 | Role | Can |
 |---|---|
@@ -229,7 +333,7 @@ credential must be retired for signing users.
 
 ---
 
-## 10. Architecture
+## 11. Architecture
 
 Per the agreed option B, with one refinement that falls out of §2.
 
@@ -249,25 +353,34 @@ table is a signature that changes when the user record changes.
   field_audit_us_logs` + `INSERT field_audit_signoffs`. This is the **first write
   path in the system**; everything until now has been append-by-workflow or
   read-only. It must be parameterised, scoped to a single `audit_id`, and reject any
-  transition not in §5's table.
+  transition not in §6's table.
 - **Basic auth stays** as the outer gate during migration, then retires for signing
   users once accounts exist.
 
 ### Migration order
 
-1. `field_audit_signoffs` table + the India equivalent
-2. Users / credentials schema on the new database
-3. Auth.js, login, MFA — no sign-off UI yet
-4. The write workflow, exercised by curl
-5. Sign-off UI: single record first, then the pending queue, then bulk
-6. Retire shared Basic auth for signing users
+1. `CREDENTIAL_REGISTRY` — Florida verified, other states as flagged stubs. Pure
+   data, no schema, independently reviewable. **Start here:** it is the piece §3
+   and §4 depend on and the cheapest thing to get wrong now rather than later.
+2. `field_audit_signoffs` table, with the jurisdiction-scoped credential snapshot
+3. Users / credentials schema on the new database
+4. Auth.js, login, MFA — no sign-off UI yet
+5. The write workflow, exercised by curl
+6. The jurisdiction-match check from §4, testable offline against the registry
+7. Sign-off UI: single record first, then the pending queue, then bulk
+8. Retire shared Basic auth for signing users
+
+Steps 1–6 change nothing a user sees, which is the right shape for something this
+consequential. Step 1 is also the only step that produces something worth showing a
+prospective customer before any of it works — the credential registry *is* the
+differentiator described in §4.
 
 Steps 1–4 change nothing a user sees, which is the right shape for something this
 consequential.
 
 ---
 
-## 11. What prints
+## 12. What prints
 
 The attestation, verbatim, and never the word "certify" unless it is true:
 
@@ -285,7 +398,7 @@ prints as superseded, with the date, rather than vanishing.
 
 ---
 
-## 12. Open questions for the owner
+## 13. Open questions for the owner
 
 1. **Do desk reviews get billed, and to whom?** It affects whether the queue needs
    per-customer attribution beyond `site_id`.
@@ -294,10 +407,12 @@ prints as superseded, with the date, rather than vanishing.
 3. **Retention.** Florida record-keeping expectations for inspection records will
    set how long signoff history must be held, and whether it may ever be deleted
    (probably not).
-4. **Multi-state.** The credential enumeration in §3 is Florida-shaped. California
-   licenses extinguisher servicing through the OSFM; other states differ. Worth
-   deciding now whether credentials are per-state from the start, since retrofitting
-   that is painful.
+4. ~~**Multi-state.**~~ **Resolved — see §3 and §4.** Credentials are
+   jurisdiction-scoped from day one, reusing the same jurisdiction keys as
+   `CODE_BASIS_REGISTRY`. Florida is seeded as verified; every other state is a stub
+   flagged `requires_confirmation: true` rather than fabricated. The remaining work
+   is per-state research, which is additive and safe — each state confirmed becomes a
+   registry edit, not a schema change.
 5. **India.** `field_audit_logs` has no sign-off columns at all. Does India need
    sign-off, and under what credential — CFO Mumbai licensing is a different regime
    entirely.
