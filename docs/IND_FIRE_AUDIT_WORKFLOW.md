@@ -299,7 +299,70 @@ for IND so the disclaimer still shows, but the workflow itself makes no such
 statement, and there is no equivalent of the US table's
 `signoff_status` / `signoff_by` / `signoff_at`.
 
-### 7.9 Shared with the US workflow
+### 7.9 Sign-off in Maharashtra is Form B — and it is a stronger hook than the US case
+
+Researched so this is written down before anyone builds it. **Nothing here is built.**
+
+The US design ([SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md)) is built around a reviewer
+concurring with a screening. Maharashtra is different, and in one respect better:
+there is already a **statutory artefact with a statutory deadline**, so sign-off has
+somewhere to go.
+
+| Concept | Maharashtra / Mumbai |
+|---|---|
+| Governing statute | **Maharashtra Fire Prevention and Life Safety Measures Act 2006**, with the **Rules 2009** |
+| Technical code | **NBC 2016 Part 4** — recommendatory until adopted; the Act is what makes it enforceable |
+| Authority (AHJ) | **Chief Fire Officer** of the Municipal Corporation — MCGM for Brihanmumbai |
+| Who may certify | a **Licensed Agency**, licensed by the Director of Maharashtra Fire Services, in categories by scope of work |
+| The artefact | **Form B** — the fire safety compliance certificate |
+| Cadence | **half-yearly, January and July** — an owner/occupier duty under the Act |
+| Equipment basis | **IS 2190** (selection, installation and maintenance of portable extinguishers), **IS 15683** (specification), ISI mark under BIS |
+| Individual qualification | typically a fire engineer employed by the Licensed Agency — B.E./Diploma in Fire Engineering, **NFSC Nagpur**, or Institution of Fire Engineers (India) |
+
+Three consequences for the design:
+
+**1. The credential is a firm licence, not an individual certification.** In Florida
+the individual holds a permit and the dealer holds another. In Maharashtra the
+**Licensed Agency** is the licensed entity, and the signing engineer's standing comes
+from qualification rather than a personal licence number. The credential model must
+therefore accommodate *qualification-based* credentials, not only numbered licences.
+
+**2. The cadence is calendar, not SLA.** The US model runs on remediation SLAs
+(0 h / 72 h / 30 d). An Indian owner thinks in **Form B periods** — H1 (January) and
+H2 (July). A sign-off queue organised by SLA age would be answering the wrong
+question; it should accumulate the half-year's audits for a premises into the
+evidence that supports that period's Form B.
+
+**3. This is the commercially interesting part.** Form B is prepared twice a year,
+largely out of files and spreadsheets. A tool that accumulates a premises' audits
+across the half-year and produces the supporting evidence pack is solving a real,
+dated, recurring obligation — not offering a nicer inspection form.
+
+The jurisdiction key would be **`IN-MH`**, and because §3 of the sign-off design made
+credentials jurisdiction-scoped with a registry, adding Maharashtra is a registry
+edit rather than a schema change. That is the payoff of that decision arriving
+earlier than expected.
+
+⚠️ **Build order matters more than the feature.** Sign-off must not be added to this
+workflow before 7.1–7.3. Signing a verdict that the model itself supplied
+(`status` trusted verbatim) means attaching a legal signature to a value a model
+revision could silently change, on a pipeline where a database outage aborts the run
+entirely. The US workflow derives its verdict in code precisely so a signature means
+something. India must reach that bar first.
+
+### 7.10 Correct the hardcoded code basis in the prompt
+
+`BUILD_Vision_Payload` says *"operating under NBC 2016 and CFO Mumbai norms"*
+verbatim. That is loose: NBC 2016 is recommendatory, and what makes it enforceable in
+Maharashtra is the MFPLSM Act 2006 and Rules 2009, with the CFO of the Municipal
+Corporation as the authority.
+
+The dashboard labels were corrected in `lib/regions.ts`; the prompt was not, because
+changing it requires a re-import. Worth doing together with any other prompt work —
+and worth adding **IS 2190** and **IS 15683** citations to the checklist at the same
+time, which is the India equivalent of the US prompt citing NFPA 10 clauses.
+
+### 7.11 Shared with the US workflow
 
 These are not India-specific — see the US document for detail:
 
@@ -334,8 +397,11 @@ These are not India-specific — see the US document for detail:
 | Structured HTTP 400 | ❌ throws instead (7.5) |
 | Timeout / retry / fallback model | ❌ none (7.6) |
 | Offline tests | ❌ none (7.7) |
-| Sign-off | ❌ no columns, no write path (7.8) |
-| Webhook authentication | ❌ open (7.9) |
+| Sign-off | ❌ no columns, no write path (7.8, 7.9) |
+| Form B support (half-yearly evidence pack) | ❌ researched, not built (7.9) |
+| Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
+| Statute stated correctly in the **prompt** | ❌ still says "NBC 2016 and CFO Mumbai norms" (7.10) |
+| Webhook authentication | ❌ open (7.11) |
 
 **Honest summary:** India works and is in production, but it is the older, thinner
 implementation. If India becomes commercially significant, 7.1 to 7.3 are the ones

@@ -413,6 +413,20 @@ prints as superseded, with the date, rather than vanishing.
    flagged `requires_confirmation: true` rather than fabricated. The remaining work
    is per-state research, which is additive and safe — each state confirmed becomes a
    registry edit, not a schema change.
-5. **India.** `field_audit_logs` has no sign-off columns at all. Does India need
-   sign-off, and under what credential — CFO Mumbai licensing is a different regime
-   entirely.
+5. **India — researched, and the recommendation is "not yet".** See
+   [IND_FIRE_AUDIT_WORKFLOW.md](IND_FIRE_AUDIT_WORKFLOW.md) §7.9. Maharashtra has a
+   *stronger* hook than the US case — **Form B**, a half-yearly statutory compliance
+   certificate signed by a Licensed Agency under the MFPLSM Act 2006 — so the
+   eventual design is clearer there than here. Two reasons to hold:
+
+   - The India workflow trusts the model's own `status` verbatim and aborts on a
+     database failure (IND §7.1–7.3). Attaching a legal signature to a verdict a
+     model revision could silently change is the wrong order of work.
+   - The credential shape differs: Maharashtra licenses the **firm**, and the signing
+     engineer's standing is a *qualification* (NFSC Nagpur, B.E. Fire, IFE India)
+     rather than a personal licence number. §3's model accommodates this — the
+     jurisdiction key would be `IN-MH` — but it needs the qualification-based variant
+     designed, not assumed.
+
+   Meanwhile the cheap credibility win is already taken: the dashboard now states the
+   Maharashtra statute correctly rather than "NBC 2016 + CFO Mumbai norms".

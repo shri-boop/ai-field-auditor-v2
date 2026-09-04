@@ -177,7 +177,10 @@ export function AuditConsole({
 
   return (
     <div className="relative min-h-screen">
-      <div className="relative z-10 px-6 py-10 sm:px-10">
+      {/* py-7, not py-10. The masthead sat in 40px of page padding above a 76px
+          mark whose text block is only ~46px tall, so the top of the screen read
+          as mostly empty. Same diagnosis as the printed letterhead band. */}
+      <div className="relative z-10 px-6 py-7 sm:px-10">
         <div className="mx-auto max-w-7xl">
           {/* ===================== MASTHEAD =====================
               Three zones: company lockup, code region, product wordmark. The
@@ -185,7 +188,7 @@ export function AuditConsole({
               it is not an input — it selects which engine and which code basis
               the whole screen is operating under, and in Records it scopes which
               table is searched. */}
-          <header className="kr-screen-only mb-6 flex flex-wrap items-center justify-between gap-x-8 gap-y-6 border-b border-[var(--kr-hairline)] pb-6">
+          <header className="kr-screen-only mb-5 flex flex-wrap items-center justify-between gap-x-8 gap-y-5 border-b border-[var(--kr-hairline)] pb-4">
             <div className="flex items-center gap-4">
               <Image
                 src={BRAND.markSrc}
@@ -196,11 +199,17 @@ export function AuditConsole({
                 className="h-[76px] w-[76px] shrink-0"
               />
               <div>
-                <div className="kr-wordmark text-[21px] leading-none">
+                {/* 23px and tighter internal spacing: the lockup's text block was
+                    ~46px against a 76px mark, so it read as a small label parked
+                    beside a large mark rather than one unit. Growing the wordmark
+                    and closing the gaps brings the two closer to the same optical
+                    weight without shrinking the mark, which was deliberately
+                    enlarged earlier. */}
+                <div className="kr-wordmark text-[23px] leading-none">
                   {BRAND.companyFirst} <em>{BRAND.companySecond}</em>
                 </div>
-                <div className="mt-2 h-px w-full bg-[var(--kr-gold)] opacity-45" />
-                <div className="kr-tagline mt-2">{BRAND.tagline}</div>
+                <div className="mt-1.5 h-px w-full bg-[var(--kr-gold)] opacity-45" />
+                <div className="kr-tagline mt-1.5">{BRAND.tagline}</div>
               </div>
             </div>
 

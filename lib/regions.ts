@@ -49,10 +49,31 @@ export const REGIONS: Record<RegionKey, RegionDef> = {
   IND: {
     key: 'IND',
     label: 'IND',
-    codeLabel: 'NBC 2016 · CFO Mumbai',
+    /**
+     * Maharashtra, stated properly.
+     *
+     * "NBC 2016 + CFO Mumbai norms" was loose. NBC 2016 is a recommendatory
+     * technical code; what makes it enforceable in Maharashtra is the Maharashtra
+     * Fire Prevention and Life Safety Measures Act 2006 and its Rules 2009, and
+     * the authority is the Chief Fire Officer of the Municipal Corporation —
+     * MCGM for Brihanmumbai.
+     *
+     * An Indian buyer tests exactly this within the first minute. Getting the
+     * statute right costs a string and is the difference between a generic AI
+     * demo and something that reads as though it knows the regime.
+     *
+     * NOTE: the workflow's prompt still says "NBC 2016 and CFO Mumbai norms"
+     * verbatim, hardcoded in BUILD_Vision_Payload. Correcting that is a separate
+     * change requiring a re-import — see IND_FIRE_AUDIT_WORKFLOW.md §7.10.
+     */
+    codeLabel: 'NBC 2016 · MFPLSM · CFO Mumbai',
     webhookPath: 'audit-field-photov2',
-    codeBasisFallback: 'NBC 2016 + CFO Mumbai norms',
-    compliantCopyFallback: 'Equipment meets all NBC 2016 and CFO Mumbai norms.',
+    codeBasisFallback:
+      'NBC 2016 Part 4, enforceable under the Maharashtra Fire Prevention and Life Safety ' +
+      'Measures Act 2006 and Rules 2009 · AHJ: Chief Fire Officer, MCGM',
+    compliantCopyFallback:
+      'Nothing visible against NBC 2016 Part 4 and the Maharashtra Fire Prevention and Life ' +
+      'Safety Measures Rules 2009. This is not a Form B certificate.',
     siteIdPlaceholder: 'SITE-MUM-401',
     timestampLocale: 'en-IN',
     /**
