@@ -7,8 +7,28 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v
 | File | Region | Code basis | Webhook |
 |---|---|---|---|
 | `AI_Field_Audit_v2.json` | India | NBC 2016 + CFO Mumbai | `/webhook/audit-field-photov2` |
+
 | `AI_Field_Audit_US.json` | United States | IFC 2024 / NFPA 1 + NFPA 10, 25, 72, 80, 96, 101, 110, with an OSHA 29 CFR 1910 overlay — resolved per jurisdiction at runtime | `/webhook/audit-field-photo-us` |
 | `AI_Field_Audit_History.json` | Both | Read-only records lookup over both audit logs | `/webhook/audit-history` |
+
+### The India workflow is hand-maintained
+
+`AI_Field_Audit_v2.json` is not generated. Non-trivial edits to it go through
+`scripts/patch_india_workflow.py`, which is idempotent and keeps the change
+reviewable rather than buried in a hand-edit of a 500-line JSON blob. It currently
+threads `asset_tag`, `inspector_id` and `image_url` from the request through to
+`LOG_Audit`.
+
+Two things to know before re-importing it into n8n:
+
+- **Update the existing workflow — do not import a second copy.** Two workflows
+  registering `/webhook/audit-field-photov2` will conflict, and India audits break.
+- The file carries `"active": true`, matching production. Confirm it is still
+  active after the import.
+- `DOWNLOAD_Image → EXTRACT_Base64` is an orphaned pair, left over from an earlier
+  base64 approach. It is not in the executing chain
+  (`Webhook → PARSE_Input → BUILD_Vision_Payload → Claude_Vision_API →
+  PARSE_Response → LOG_Audit`) and is left alone deliberately.
 
 The US workflow is a **build artifact**. Its logic lives in `scripts/nodes/*.js`;
 regenerate with `python3 scripts/build_us_workflow.py` and test offline with
@@ -97,18 +117,23 @@ guarded — safe to re-run, and it skips cleanly if the table's shape differs.
 
 | | `field_audit_us_logs` | `field_audit_logs` (India) |
 |---|---|---|
-| Source of truth | `scripts/db/001_field_audit_us_logs.sql` | none — created ad hoc |
-| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 9 |
+| Source of truth | `scripts/db/001_field_audit_us_logs.sql` | created ad hoc; extended by `003` |
+| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 12 |
 | Primary key | `audit_id` (text, minted) | `id` (integer, serial) |
 | `audit_timestamp` type | `timestamptz` | **`text`** |
 | Range filter / ordering | `audit_timestamp` | `created_at` (see below) |
-| Filters | site, asset tag, audit id, status, date range | site, record id, status, date range |
+| Filters | site, asset tag, audit id, status, date range | site, record id, asset tag, status, date range |
 
-`asset_tag` and `audit_id` filters are **rejected** for `IND` rather than
-ignored — silently dropping a filter would return rows the caller did not ask
-for, which on an audit log is worse than an error. India records are addressed by
-`record_id`, its integer primary key, which the API exposes as the `audit_id`
-analogue.
+`audit_id` is **rejected** for `IND` rather than ignored — it is a minted string
+only the US workflow produces, and silently dropping a filter would return rows
+the caller did not ask for. India records are addressed by `record_id`, its
+integer primary key.
+
+Migration `003` added `asset_tag`, `inspector_id` and `image_url` to the India
+table, bringing it to parity on the three fields that mattered: telling two
+devices at one site apart, recording who captured the evidence, and being able to
+show that evidence on a retrieved record. **Rows written before that migration
+have NULL in all three**, so an older India record still has no photograph.
 
 **India range filtering uses `created_at`, not `audit_timestamp`.** That column is
 `text` on this table, and `text >= timestamptz` has no operator in Postgres — the

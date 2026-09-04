@@ -55,7 +55,14 @@ export const REGIONS: Record<RegionKey, RegionDef> = {
     compliantCopyFallback: 'Equipment meets all NBC 2016 and CFO Mumbai norms.',
     siteIdPlaceholder: 'SITE-MUM-401',
     timestampLocale: 'en-IN',
-    fields: [],
+    /**
+     * India has no jurisdiction registry — the workflow hardcodes NBC 2016 + CFO
+     * Mumbai — but migration 003 gave field_audit_logs asset_tag, inspector_id
+     * and image_url, so those two inputs now apply to both regions. Requires the
+     * re-imported AI_Field_Audit_v2.json to be live; before that the values are
+     * accepted and simply not persisted.
+     */
+    fields: ['asset_tag', 'inspector_id'],
   },
   US: {
     key: 'US',
@@ -68,11 +75,9 @@ export const REGIONS: Record<RegionKey, RegionDef> = {
     siteIdPlaceholder: 'SITE-CA-LAX-014',
     timestampLocale: 'en-US',
     /**
-     * asset_tag and inspector_id are US-only because only field_audit_us_logs has
-     * the columns. A site is audited repeatedly and holds many devices, so
-     * asset_tag is what distinguishes "the extinguisher by the kitchen door" from
-     * "the one in the corridor" — without it two audits of one site are
-     * genuinely ambiguous. India's table cannot record either.
+     * A site is audited repeatedly and holds many devices, so asset_tag is what
+     * distinguishes "the extinguisher by the kitchen door" from "the one in the
+     * corridor" — without it two audits of one site are genuinely ambiguous.
      */
     fields: [
       'jurisdiction',

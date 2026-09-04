@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || {};\n\nconst image_url = body.image_url || null;\nconst site_id = body.site_id || 'unknown';\n\nif (!image_url || image_url.trim().length === 0) {\n  throw new Error('Missing required field: image_url not found in request body.');\n}\n\nreturn [{\n  json: {\n    image_url: image_url.trim(),\n    site_id: site_id\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || {};\n\nconst image_url = body.image_url || null;\nconst site_id = body.site_id || 'unknown';\n\nif (!image_url || image_url.trim().length === 0) {\n  throw new Error('Missing required field: image_url not found in request body.');\n}\n\n// asset_tag identifies WHICH device at the site. A site holds many devices and is\n// audited repeatedly, so without it two audits of one address are\n// indistinguishable. inspector_id records who captured the evidence; it is what\n// prints as \"Captured by\" on the report, and it is deliberately NOT the sign-off\n// name — that requires a qualified reviewer, not whoever ran the scan.\nfunction clean(value, fallback, maxLength) {\n  const out = String(value === undefined || value === null ? '' : value).trim();\n  return (out || fallback).slice(0, maxLength || 64);\n}\n\nreturn [{\n  json: {\n    image_url: image_url.trim(),\n    site_id: site_id,\n    asset_tag: clean(body.asset_tag, '', 64) || null,\n    inspector_id: clean(body.inspector_id, 'UNASSIGNED', 64)\n  }\n}];"
       },
       "id": "b71dc0a6-05d9-4cb7-9205-f1d16d7486c9",
       "name": "PARSE_Input",
@@ -73,7 +73,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content || '';\n\nlet cleaned = raw\n  .replace(/```json\\s*/gi, '')\n  .replace(/```\\s*/g, '')\n  .trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    equipment_type: 'Unknown',\n    status: 'ERROR',\n    confidence: 'LOW',\n    observations: 'Failed to parse AI response: ' + e.message,\n    violations: ['AI_PARSE_ERROR']\n  };\n}\n\nconst site_id = $('BUILD_Vision_Payload').first().json.site_id || 'unknown';\n\nreturn [{\n  json: {\n    ...parsed,\n    site_id: site_id,\n    audit_timestamp: new Date().toISOString()\n  }\n}];"
+        "jsCode": "const raw = $input.first().json.choices?.[0]?.message?.content || '';\n\nlet cleaned = raw\n  .replace(/```json\\s*/gi, '')\n  .replace(/```\\s*/g, '')\n  .trim();\n\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    equipment_type: 'Unknown',\n    status: 'ERROR',\n    confidence: 'LOW',\n    observations: 'Failed to parse AI response: ' + e.message,\n    violations: ['AI_PARSE_ERROR']\n  };\n}\n\nconst site_id = $('BUILD_Vision_Payload').first().json.site_id || 'unknown';\n\n// Read straight from PARSE_Input rather than threading these through\n// BUILD_Vision_Payload: n8n resolves a node reference by name wherever it sits in\n// the chain, so the payload builder keeps its narrow contract.\n//\n// image_url is persisted so a retrieved record can show its evidence. Without it\n// an archived India audit has no photograph at all, and a fire-safety record\n// whose evidence cannot be reproduced is barely a record.\nconst source = $('PARSE_Input').first().json;\n\nreturn [{\n  json: {\n    ...parsed,\n    site_id: site_id,\n    asset_tag: source.asset_tag || null,\n    inspector_id: source.inspector_id || 'UNASSIGNED',\n    image_url: source.image_url || null,\n    audit_timestamp: new Date().toISOString()\n  }\n}];"
       },
       "id": "39f53de3-a66c-4bb1-af0f-e09100933337",
       "name": "PARSE_Response",
@@ -106,7 +106,10 @@
             "site_id": "={{ $json.site_id }}",
             "audit_timestamp": "={{ $json.audit_timestamp }}",
             "confidence": "={{ $json.confidence }}",
-            "observations": "={{ $json.observations }}"
+            "observations": "={{ $json.observations }}",
+            "asset_tag": "={{ $json.asset_tag }}",
+            "inspector_id": "={{ $json.inspector_id }}",
+            "image_url": "={{ $json.image_url }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -167,6 +170,33 @@
             {
               "id": "observations",
               "displayName": "observations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "asset_tag",
+              "displayName": "asset_tag",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "inspector_id",
+              "displayName": "inspector_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "image_url",
+              "displayName": "image_url",
               "required": false,
               "defaultMatch": false,
               "display": true,

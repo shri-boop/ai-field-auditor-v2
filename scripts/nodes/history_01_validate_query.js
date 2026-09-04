@@ -50,10 +50,12 @@
  *
  * 2. There IS a primary key after all: `id`. India records therefore have a
  *    stable identifier, exposed as `record_id`, which is the IND analogue of the
- *    US `audit_id`. `audit_id` and `asset_tag` remain rejected for IND, because
- *    those columns genuinely do not exist — silently dropping a filter would
- *    return rows the caller did not ask for, which on an audit log is worse than
- *    an error.
+ *    US `audit_id`. `audit_id` itself stays rejected for IND — it is a minted
+ *    string that only the US workflow produces.
+ *
+ * Migration 003 added asset_tag, inspector_id and image_url to this table, so
+ * asset_tag is now a valid IND filter and India records finally carry evidence.
+ * Rows written before that migration have NULL in all three.
  *
  * Authentication is handled by the Webhook node's Header Auth credential, not
  * here: the Code node sandbox blocks env access, so a secret compared in JS
@@ -130,14 +132,11 @@ if (body.record_id !== undefined && body.record_id !== null && String(body.recor
   }
 }
 
-// India has no such columns; refuse rather than quietly widen the result set.
-if (region === 'IND' && asset_tag) {
-  return reject(
-    'FILTER_UNSUPPORTED_FOR_REGION',
-    'The India audit log has no asset_tag column, so that filter cannot be applied.',
-    asset_tag
-  );
-}
+// audit_id is a MINTED identifier and exists only on the US table. India has no
+// equivalent — it has an integer primary key, offered as record_id — so the
+// filter is refused rather than quietly ignored. Silently dropping a filter
+// returns rows the caller did not ask for, which on an audit log is worse than
+// an error.
 if (region === 'IND' && audit_id) {
   return reject(
     'FILTER_UNSUPPORTED_FOR_REGION',
@@ -236,8 +235,8 @@ if (!site_id && !asset_tag && !audit_id && !record_id && !fromParsed.value && !t
 const params = region === 'US'
   //  $1        $2         $3        $4      $5                $6              $7     $8
   ? [site_id, asset_tag, audit_id, status, fromParsed.value, toParsed.value, limit, offset]
-  //  $1        $2         $3      $4                $5              $6     $7
-  : [site_id, record_id, status, fromParsed.value, toParsed.value, limit, offset];
+  //  $1        $2         $3          $4      $5                $6              $7     $8
+  : [site_id, record_id, asset_tag, status, fromParsed.value, toParsed.value, limit, offset];
 
 return [{
   json: {

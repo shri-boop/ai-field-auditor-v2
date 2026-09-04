@@ -131,9 +131,11 @@ export function AuditConsole({
         payload.occupancy_type = occupancy;
         payload.equipment_hint = equipmentHint;
         payload.osha_workplace = oshaWorkplace;
-        if (assetTag.trim()) payload.asset_tag = assetTag.trim();
-        if (inspectorId.trim()) payload.inspector_id = inspectorId.trim();
       }
+      // Both regions since migration 003. The proxy gates them against the region
+      // registry anyway, so a region that cannot store them drops them server-side.
+      if (assetTag.trim()) payload.asset_tag = assetTag.trim();
+      if (inspectorId.trim()) payload.inspector_id = inspectorId.trim();
 
       const auditRes = await fetch('/api/audit', {
         method: 'POST',
@@ -288,6 +290,41 @@ export function AuditConsole({
                   <SiteHistoryNotice region={region} siteId={siteId} enabled={recordsEnabled} />
                 </section>
 
+                {/* Asset tag and inspector — BOTH regions since migration 003 gave
+                    field_audit_logs the columns. site_id alone cannot identify what
+                    was inspected: two extinguishers at one address produce two
+                    records that read identically without a tag. Driven off the
+                    region registry rather than a region check, so a region that
+                    genuinely cannot store them never shows them. */}
+                {regionDef.fields.includes('asset_tag') && (
+                  <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <label htmlFor="asset-tag" className="kr-eyebrow block">
+                        Asset tag
+                      </label>
+                      <Input
+                        id="asset-tag"
+                        placeholder={region === 'US' ? 'EXT-014-03' : 'EXT-502-01'}
+                        value={assetTag}
+                        onChange={(e) => setAssetTag(e.target.value)}
+                        className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label htmlFor="inspector-id" className="kr-eyebrow block">
+                        Inspector
+                      </label>
+                      <Input
+                        id="inspector-id"
+                        placeholder="TECH-4471"
+                        value={inspectorId}
+                        onChange={(e) => setInspectorId(e.target.value)}
+                        className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
+                      />
+                    </div>
+                  </section>
+                )}
+
                 {/* US-only. The India workflow hardcodes NBC 2016 + CFO Mumbai
                     and has no jurisdiction concept, so these come from the
                     registry rather than being shown unconditionally. */}
@@ -353,37 +390,6 @@ export function AuditConsole({
                           {hintFor(US_EQUIPMENT, equipmentHint)}
                         </p>
                       )}
-                    </div>
-
-                    {/* Asset tag and inspector. A site holds many devices and is
-                        audited repeatedly, so site_id alone cannot identify what
-                        was inspected — two extinguishers at one address produce
-                        two records that read identically without these. */}
-                    <div className="grid grid-cols-1 gap-4 border-t border-[var(--kr-hairline-2)] pt-4 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <label htmlFor="asset-tag" className="kr-label block">
-                          Asset tag
-                        </label>
-                        <Input
-                          id="asset-tag"
-                          placeholder="EXT-014-03"
-                          value={assetTag}
-                          onChange={(e) => setAssetTag(e.target.value)}
-                          className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <label htmlFor="inspector-id" className="kr-label block">
-                          Inspector
-                        </label>
-                        <Input
-                          id="inspector-id"
-                          placeholder="TECH-4471"
-                          value={inspectorId}
-                          onChange={(e) => setInspectorId(e.target.value)}
-                          className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
-                        />
-                      </div>
                     </div>
 
                     <div className="flex items-center justify-between gap-4 border-t border-[var(--kr-hairline-2)] pt-4">

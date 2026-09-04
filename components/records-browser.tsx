@@ -93,7 +93,7 @@ export function RecordsBrowser({ region }: { region: RegionKey }) {
       if (region === 'US') body.audit_id = reference.trim();
       else body.record_id = reference.trim();
     }
-    if (region === 'US' && assetTag.trim()) body.asset_tag = assetTag.trim();
+    if (assetTag.trim()) body.asset_tag = assetTag.trim();
     return body;
   };
 
@@ -216,18 +216,17 @@ export function RecordsBrowser({ region }: { region: RegionKey }) {
             />
           </Field>
 
-          {/* US only: field_audit_logs has no asset_tag column, and the backend
-              rejects the filter rather than ignoring it. */}
-          {region === 'US' && (
-            <Field label="Asset tag">
-              <Input
-                value={assetTag}
-                onChange={(e) => setAssetTag(e.target.value)}
-                placeholder="EXT-014-03"
-                className={FIELD}
-              />
-            </Field>
-          )}
+          {/* Both regions since migration 003 added asset_tag to field_audit_logs.
+              India rows written before that migration have NULL, so a tag search
+              only finds audits recorded after it. */}
+          <Field label="Asset tag">
+            <Input
+              value={assetTag}
+              onChange={(e) => setAssetTag(e.target.value)}
+              placeholder={region === 'US' ? 'EXT-014-03' : 'EXT-502-01'}
+              className={FIELD}
+            />
+          </Field>
 
           <Field label="From">
             <Input

@@ -88,17 +88,21 @@ LIMIT $7::int OFFSET $8::int"""
 #
 # There is no audit_id or asset_tag column, so those filters are rejected for IND
 # rather than ignored. There IS a primary key — id — exposed as record_id.
+# asset_tag, inspector_id and image_url were added by migration 003. Rows written
+# before it have NULL in all three, so the UI must treat them as optional — an
+# India record from before the migration has no evidence photo.
 IND_QUERY = """SELECT
-  id, site_id, equipment_type, status, confidence, observations, violations,
-  audit_timestamp, created_at
+  id, site_id, asset_tag, inspector_id, equipment_type, status, confidence,
+  observations, violations, image_url, audit_timestamp, created_at
 FROM field_audit_logs
-WHERE ($1::text        IS NULL OR site_id = $1)
-  AND ($2::int         IS NULL OR id      = $2)
-  AND ($3::text        IS NULL OR status  = $3)
-  AND ($4::timestamptz IS NULL OR created_at >= $4)
-  AND ($5::timestamptz IS NULL OR created_at <  $5)
+WHERE ($1::text        IS NULL OR site_id   = $1)
+  AND ($2::int         IS NULL OR id        = $2)
+  AND ($3::text        IS NULL OR asset_tag = $3)
+  AND ($4::text        IS NULL OR status    = $4)
+  AND ($5::timestamptz IS NULL OR created_at >= $5)
+  AND ($6::timestamptz IS NULL OR created_at <  $6)
 ORDER BY created_at DESC
-LIMIT $6::int OFFSET $7::int"""
+LIMIT $7::int OFFSET $8::int"""
 
 
 def js(filename):
@@ -309,9 +313,11 @@ def build():
             "- `limit` is capped at 100.\n"
             "- Read-only: SELECT only, no write path exists in this workflow.\n\n"
             "### Regions are not symmetric\n"
-            "`field_audit_us_logs` is the rich table. `field_audit_logs` (India) holds only seven "
-            "columns and has no `audit_id` or `asset_tag`, so those filters are **rejected** for "
-            "IND rather than ignored.\n\n"
+            "`field_audit_us_logs` is the rich table. `field_audit_logs` (India) has no minted "
+            "`audit_id` — it has an integer primary key, offered as `record_id` — so `audit_id` is "
+            "**rejected** for IND rather than ignored.\n\n"
+            "Migration 003 added `asset_tag`, `inspector_id` and `image_url` to the India table, so "
+            "those are now returned. Rows written before that migration have NULL in all three.\n\n"
             "Build artifact — edit `scripts/nodes/history_*.js` and run "
             "`python3 scripts/build_history_workflow.py`.",
             [-260, 520],
