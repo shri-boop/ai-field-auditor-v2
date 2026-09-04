@@ -541,6 +541,50 @@
     color: #5f4b1e !important;
   }
 
+  /* ---- letterhead band ---------------------------------------------------
+     The logomark is gold on transparent and was drawn for a dark ground. On the
+     inverted print page it sat gold-on-white, where it loses most of its
+     contrast and the fine interior geometry vanishes — the reason it "didn't pop"
+     in the PDF.
+
+     Rather than swap in a second raster with a baked background, the band
+     restores the dark ground the brand's own email template uses, and simply
+     RE-DECLARES the --kr-* tokens locally. Custom properties cascade, so every
+     rule inside the band — wordmark, tagline, gold rule, labels — reverts to its
+     dark-theme values without a single override. Scoped to the lockup rather than
+     the page so it reads as a letterhead and does not flood a printer.
+
+     print-color-adjust: exact is mandatory here. Without it, drivers in economy
+     mode drop the background and leave gold text on white, which is worse than
+     where this started. */
+  .kr-print-letterhead {
+    --kr-light: #efeae0;
+    --kr-body: #d8d1c4;
+    --kr-muted: #a99f8c;
+    --kr-gold: #c9a35b;
+    --kr-gold-soft: #d9b878;
+    --kr-gold-deep: #a8823f;
+    --kr-hairline: rgba(201, 163, 91, 0.35);
+
+    background: #0e0c08 !important;
+    color: #d8d1c4;
+    border-radius: 3px;
+    padding: 7mm 8mm;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Inside the band the page is dark again, so the script wordmark goes back to
+     bright gold rather than the darkened value used on white. */
+  .kr-print-letterhead .kr-script {
+    -webkit-text-fill-color: #d9b878 !important;
+    color: #d9b878 !important;
+  }
+
+  .kr-print-letterhead .kr-tagline {
+    color: #b3a988 !important;
+  }
+
   .kr-action,
   .kr-ghost {
     box-shadow: none !important;

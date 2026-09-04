@@ -160,6 +160,10 @@ export function RecordsBrowser({ region }: { region: RegionKey }) {
         result={selected}
         region={region}
         evidenceUrl={selected.image_url ?? null}
+        evidenceLabel={selected.asset_tag ?? null}
+        // A retrieved record has no input column, so without this the evidence
+        // would exist only in the printed output.
+        evidenceOnScreen
         actions={
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Button
@@ -378,8 +382,21 @@ function RecordRow({
             >
               {row.status ?? 'UNKNOWN'}
             </p>
-            <p className="kr-data mt-1.5 truncate text-sm text-kr-light">{row.site_id ?? '—'}</p>
-            <p className="mt-1 truncate text-[11px] text-kr-muted">{row.equipment_type ?? '—'}</p>
+            <p className="kr-data mt-1.5 flex flex-wrap items-baseline gap-x-2 text-sm text-kr-light">
+              {row.site_id ?? '—'}
+              {/* The asset tag is what tells two devices at one site apart. A
+                  site is audited repeatedly and holds many devices, so without
+                  it the rows read as duplicates. */}
+              {row.asset_tag && (
+                <span className="text-[11px] text-kr-gold">/ {row.asset_tag}</span>
+              )}
+            </p>
+            <p className="mt-1 truncate text-[11px] text-kr-muted">
+              {row.equipment_type ?? '—'}
+              {row.inspector_id && row.inspector_id !== 'UNASSIGNED' && (
+                <span className="ml-2 opacity-70">· {row.inspector_id}</span>
+              )}
+            </p>
           </div>
 
           <div className="flex shrink-0 flex-col items-end gap-1.5">

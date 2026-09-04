@@ -42,6 +42,16 @@ export interface AuditReportProps {
    */
   evidenceUrl?: string | null;
   evidenceLabel?: string | null;
+  /**
+   * Show the evidence on screen as well as on paper.
+   *
+   * A live audit leaves it false: the photograph is already sitting in the input
+   * column beside the report, so repeating it would be noise. A retrieved record
+   * has no input column, and the evidence was invisible on screen until this
+   * existed — the plate is print-only, so the photo appeared in the PDF and
+   * nowhere else.
+   */
+  evidenceOnScreen?: boolean;
   /** Screen-only controls (Print, New audit, Back to results). */
   actions?: ReactNode;
 }
@@ -52,6 +62,7 @@ export function AuditReport({
   siteIdFallback,
   evidenceUrl,
   evidenceLabel,
+  evidenceOnScreen = false,
   actions,
 }: AuditReportProps) {
   const regionDef = REGIONS[region];
@@ -89,14 +100,20 @@ export function AuditReport({
           Paper needs identification the screen does not: the app masthead is
           hidden when printing, so the record carries its own letterhead plus the
           fields an AHJ or insurer looks for first. */}
-      <div className="kr-print-only kr-avoid-break mb-5 border-b border-[var(--kr-hairline)] pb-4">
-        <div className="flex items-start justify-between gap-6">
+      <div className="kr-print-only kr-avoid-break mb-5">
+        {/* Ink letterhead band. The mark is gold on transparent and was designed
+            for a dark ground; on the light printed page it lost almost all
+            contrast and the fine geometry disappeared. This restores the dark
+            band the brand's email template uses, scoped to the lockup rather
+            than the whole page so it stays a letterhead and not a toner sink. */}
+        <div className="kr-print-letterhead flex items-start justify-between gap-6">
           <div className="flex items-center gap-3">
-            <Image src={BRAND.markSrc} alt="" width={54} height={54} />
+            <Image src={BRAND.markSrc} alt="" width={58} height={58} />
             <div>
               <div className="kr-wordmark text-[15px] leading-none">
                 {BRAND.companyFirst} <em>{BRAND.companySecond}</em>
               </div>
+              <div className="mt-1.5 h-px w-full bg-[var(--kr-gold)] opacity-50" />
               <div className="kr-tagline mt-1.5">{BRAND.tagline}</div>
             </div>
           </div>
@@ -129,6 +146,35 @@ export function AuditReport({
           <PrintRow label="Asset tag" value={result.asset_tag ?? undefined} />
         </dl>
       </div>
+
+      {/* Evidence on screen. Only for a retrieved record — see evidenceOnScreen. */}
+      {evidenceOnScreen && evidenceUrl && (
+        <section className="kr-screen-only kr-card overflow-hidden">
+          <div className="flex items-center justify-between gap-4 px-5 pt-4">
+            <p className="kr-eyebrow">Evidence</p>
+            <a
+              href={evidenceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="kr-label transition-colors hover:text-kr-gold"
+            >
+              Open full size ↗
+            </a>
+          </div>
+          {/* Plain img: an arbitrary-dimension photograph wanted at full
+              resolution for print, and for a live audit the source is an
+              in-memory blob: URL that next/image cannot process anyway. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={evidenceUrl}
+            alt="Audit subject"
+            className="mt-4 max-h-[420px] w-full bg-[var(--kr-ink)] object-contain"
+          />
+          {evidenceLabel && (
+            <p className="kr-data truncate px-5 py-3 text-[10px] text-kr-muted">{evidenceLabel}</p>
+          )}
+        </section>
+      )}
 
       {/* -------- evidence plate (print) --------
           On screen the photograph sits in the input column for a live audit, and

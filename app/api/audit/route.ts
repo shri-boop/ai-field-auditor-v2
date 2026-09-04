@@ -106,11 +106,15 @@ export async function POST(request: Request) {
     // The backend treats anything !== false as true; mirror that explicitly.
     payload.osha_workplace = body.osha_workplace !== false;
   }
-  if (typeof body.inspector_id === 'string' && body.inspector_id.trim()) {
-    payload.inspector_id = body.inspector_id.trim();
+  // Region-gated like the rest. These two were previously appended
+  // unconditionally, which contradicted the promise above: India's PARSE_Input
+  // reads neither and its table has no column for either, so forwarding them was
+  // sending fields the workflow was documented never to receive.
+  if (regionDef.fields.includes('inspector_id') && typeof body.inspector_id === 'string') {
+    if (body.inspector_id.trim()) payload.inspector_id = body.inspector_id.trim();
   }
-  if (typeof body.asset_tag === 'string' && body.asset_tag.trim()) {
-    payload.asset_tag = body.asset_tag.trim();
+  if (regionDef.fields.includes('asset_tag') && typeof body.asset_tag === 'string') {
+    if (body.asset_tag.trim()) payload.asset_tag = body.asset_tag.trim();
   }
 
   const target = `${n8nBaseUrl()}/webhook/${regionDef.webhookPath}`;
