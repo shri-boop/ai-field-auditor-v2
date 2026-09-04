@@ -27,11 +27,33 @@
  * jurisdiction, deficiencies, code_basis and sign-off columns.
  *
  * field_audit_logs (India) was created ad hoc — there is no DDL for it in this
- * repo — and the India workflow writes only seven columns: site_id,
- * equipment_type, status, confidence, observations, violations, audit_timestamp.
- * It has no audit_id and no asset_tag, so those filters are rejected for IND
- * rather than silently ignored. Silently dropping a filter would return rows the
- * caller did not ask for, which on an audit log is worse than an error.
+ * repo. Its real shape, confirmed against the live database:
+ *
+ *   id              integer  PRIMARY KEY (field_audit_logs_pkey)
+ *   equipment_type  text
+ *   status          text
+ *   confidence      text
+ *   observations    text
+ *   violations      text      (a stringified JSON array)
+ *   site_id         text
+ *   audit_timestamp text      <-- NOT a timestamp type
+ *   created_at      timestamptz DEFAULT now()
+ *
+ * Two consequences drive the India query:
+ *
+ * 1. `audit_timestamp` is TEXT. Comparing it against a timestamptz parameter
+ *    raises "operator does not exist: text >= timestamp with time zone", so the
+ *    date range filters on `created_at` — a real timestamptz — instead. The two
+ *    are written milliseconds apart in the same n8n execution, so they are
+ *    interchangeable for range purposes. `audit_timestamp` is still returned for
+ *    display.
+ *
+ * 2. There IS a primary key after all: `id`. India records therefore have a
+ *    stable identifier, exposed as `record_id`, which is the IND analogue of the
+ *    US `audit_id`. `audit_id` and `asset_tag` remain rejected for IND, because
+ *    those columns genuinely do not exist — silently dropping a filter would
+ *    return rows the caller did not ask for, which on an audit log is worse than
+ *    an error.
  *
  * Authentication is handled by the Webhook node's Header Auth credential, not
  * here: the Code node sandbox blocks env access, so a secret compared in JS
@@ -84,6 +106,27 @@ if (status_raw) {
       'Unknown "status". Expected one of: ' + STATUSES.join(', ') + '.',
       status_raw
     );
+  }
+}
+
+// ------------------------------------------------------- record_id (IND only)
+// The India analogue of audit_id: field_audit_logs.id, an integer primary key.
+let record_id = null;
+if (body.record_id !== undefined && body.record_id !== null && String(body.record_id).trim() !== '') {
+  if (region !== 'IND') {
+    return reject(
+      'FILTER_UNSUPPORTED_FOR_REGION',
+      'record_id applies to the India log only. Use audit_id for US records.',
+      body.record_id
+    );
+  }
+  const raw = String(body.record_id).trim();
+  if (!/^\d+$/.test(raw)) {
+    return reject('RECORD_ID_INVALID', '"record_id" must be a positive integer.', body.record_id);
+  }
+  record_id = parseInt(raw, 10);
+  if (!(record_id > 0)) {
+    return reject('RECORD_ID_INVALID', '"record_id" must be a positive integer.', body.record_id);
   }
 }
 
@@ -178,10 +221,10 @@ if (isNaN(offset) || offset < 0) offset = 0;
 // Require at least one narrowing filter. An unbounded "give me everything"
 // query against an append-only log is both a slow query and an enumeration
 // primitive; the caller must say what they are looking for.
-if (!site_id && !asset_tag && !audit_id && !fromParsed.value && !toParsed.value) {
+if (!site_id && !asset_tag && !audit_id && !record_id && !fromParsed.value && !toParsed.value) {
   return reject(
     'FILTER_REQUIRED',
-    'Supply at least one of: site_id, asset_tag, audit_id, from, to. ' +
+    'Supply at least one of: site_id, asset_tag, audit_id, record_id, from, to. ' +
       'Unfiltered listing of the audit log is not permitted.',
     null
   );
@@ -193,8 +236,8 @@ if (!site_id && !asset_tag && !audit_id && !fromParsed.value && !toParsed.value)
 const params = region === 'US'
   //  $1        $2         $3        $4      $5                $6              $7     $8
   ? [site_id, asset_tag, audit_id, status, fromParsed.value, toParsed.value, limit, offset]
-  //  $1        $2      $3                $4              $5     $6
-  : [site_id, status, fromParsed.value, toParsed.value, limit, offset];
+  //  $1        $2         $3      $4                $5              $6     $7
+  : [site_id, record_id, status, fromParsed.value, toParsed.value, limit, offset];
 
 return [{
   json: {
@@ -208,6 +251,7 @@ return [{
       site_id: site_id,
       asset_tag: asset_tag,
       audit_id: audit_id,
+      record_id: record_id,
       status: status,
       from: fromParsed.value,
       to: toParsed.value,

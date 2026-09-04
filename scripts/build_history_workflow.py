@@ -63,17 +63,42 @@ WHERE ($1::text        IS NULL OR site_id  = $1)
 ORDER BY audit_timestamp DESC
 LIMIT $7::int OFFSET $8::int"""
 
-# The India table has no audit_id, asset_tag, jurisdiction or deficiencies —
-# VALIDATE_Query rejects those filters for IND rather than ignoring them.
+# The India table, confirmed against the live database:
+#
+#   id integer PK | equipment_type text | status text | confidence text
+#   observations text | violations text | site_id text
+#   audit_timestamp TEXT  <-- not a timestamp type
+#   created_at timestamptz DEFAULT now()
+#
+# ⚠️ RANGE FILTERING USES created_at, NOT audit_timestamp.
+# audit_timestamp is a text column. `text >= timestamptz` has no operator in
+# Postgres, so filtering it against a typed parameter raises
+# "operator does not exist: text >= timestamp with time zone". Casting the column
+# per row would work but would discard any index and would explode on a single
+# malformed value.
+#
+# created_at is a real timestamptz, written by DEFAULT now() in the same
+# statement that sets audit_timestamp, so for range purposes they are the same
+# instant. ORDER BY uses it too: ordering by the text column only appears correct
+# because every value happens to be a fixed-width ISO-8601 Z string, which makes
+# lexicographic order match chronological order — true today, silently wrong the
+# first time anything writes a different format.
+#
+# audit_timestamp is still SELECTed, because it is what the record should display.
+#
+# There is no audit_id or asset_tag column, so those filters are rejected for IND
+# rather than ignored. There IS a primary key — id — exposed as record_id.
 IND_QUERY = """SELECT
-  site_id, equipment_type, status, confidence, observations, violations, audit_timestamp
+  id, site_id, equipment_type, status, confidence, observations, violations,
+  audit_timestamp, created_at
 FROM field_audit_logs
 WHERE ($1::text        IS NULL OR site_id = $1)
-  AND ($2::text        IS NULL OR status  = $2)
-  AND ($3::timestamptz IS NULL OR audit_timestamp >= $3)
-  AND ($4::timestamptz IS NULL OR audit_timestamp <  $4)
-ORDER BY audit_timestamp DESC
-LIMIT $5::int OFFSET $6::int"""
+  AND ($2::int         IS NULL OR id      = $2)
+  AND ($3::text        IS NULL OR status  = $3)
+  AND ($4::timestamptz IS NULL OR created_at >= $4)
+  AND ($5::timestamptz IS NULL OR created_at <  $5)
+ORDER BY created_at DESC
+LIMIT $6::int OFFSET $7::int"""
 
 
 def js(filename):

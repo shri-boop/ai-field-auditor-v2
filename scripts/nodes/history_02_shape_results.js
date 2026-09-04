@@ -135,18 +135,28 @@ function shapeUs(r) {
 
 function shapeInd(r) {
   return {
-    // The India table holds only these seven columns. Everything the US shape
-    // carries is absent by design, not missing by accident — the fields are
-    // emitted as empty so the renderer's optional-field handling does the work
-    // and no separate India code path is needed.
+    // The India table holds nine columns. Everything the US shape carries beyond
+    // them is absent by design, not missing by accident — those fields are
+    // emitted empty so the renderer's optional-field handling does the work and
+    // no separate India code path is needed.
+    //
+    // There is no minted audit_id, but there IS an integer primary key, so an
+    // India record can still be addressed exactly. record_id is its analogue.
     audit_id: null,
+    record_id: r.id === undefined ? null : r.id,
     site_id: r.site_id,
     status: r.status,
     confidence: r.confidence,
     equipment_type: r.equipment_type,
     observations: r.observations,
     violations: toArray(r.violations),
-    audit_timestamp: iso(r.audit_timestamp),
+
+    // audit_timestamp is a TEXT column on this table. It holds ISO-8601 from
+    // toISOString(), so iso() normalises it, but fall back to created_at — the
+    // real timestamptz, and what the range filter and ordering actually use —
+    // rather than surfacing null if anything ever wrote a different format.
+    audit_timestamp: iso(r.audit_timestamp) || iso(r.created_at),
+    created_at: iso(r.created_at),
 
     deficiencies: [],
     unverifiable_items: [],
