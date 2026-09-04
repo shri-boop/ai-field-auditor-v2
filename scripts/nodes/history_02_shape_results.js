@@ -135,16 +135,22 @@ function shapeUs(r) {
 
 function shapeInd(r) {
   return {
-    // The India table holds nine columns. Everything the US shape carries beyond
-    // them is absent by design, not missing by accident — those fields are
-    // emitted empty so the renderer's optional-field handling does the work and
-    // no separate India code path is needed.
+    // Everything the US shape carries beyond the India table's columns is absent
+    // by design, not missing by accident — those fields are emitted empty so the
+    // renderer's optional-field handling does the work and no separate India code
+    // path is needed.
     //
     // There is no minted audit_id, but there IS an integer primary key, so an
     // India record can still be addressed exactly. record_id is its analogue.
     audit_id: null,
     record_id: r.id === undefined ? null : r.id,
     site_id: r.site_id,
+
+    // Added by migration 003. NULL on every row written before it, which is why
+    // they stay optional rather than becoming required fields in the UI.
+    asset_tag: r.asset_tag === undefined ? null : r.asset_tag,
+    inspector_id: r.inspector_id === undefined ? null : r.inspector_id,
+    image_url: r.image_url === undefined ? null : r.image_url,
     status: r.status,
     confidence: r.confidence,
     equipment_type: r.equipment_type,

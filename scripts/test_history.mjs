@@ -91,10 +91,10 @@ check('blank strings do not count as a filter',
   validate({ region: 'US', site_id: '   ' }).error_code === 'FILTER_REQUIRED');
 
 // ------------------------------------------------------- region asymmetry
-console.log('\nregion asymmetry (India: 9 columns, no audit_id / asset_tag, but an id PK)');
-check('IND rejects an asset_tag filter rather than ignoring it',
-  validate({ region: 'IND', asset_tag: 'EXT-1' }).error_code === 'FILTER_UNSUPPORTED_FOR_REGION');
-check('IND rejects an audit_id filter rather than ignoring it',
+console.log('\nregion asymmetry (India has an id PK and, since migration 003, asset_tag)');
+check('IND now ACCEPTS an asset_tag filter (migration 003)',
+  validate({ region: 'IND', asset_tag: 'EXT-1' }).query_ok === true);
+check('IND rejects an audit_id filter — that identifier is minted by the US workflow only',
   validate({ region: 'IND', audit_id: 'FA-US-1' }).error_code === 'FILTER_UNSUPPORTED_FOR_REGION');
 check('US accepts asset_tag', validate({ region: 'US', asset_tag: 'EXT-1' }).query_ok === true);
 check('US accepts audit_id', validate({ region: 'US', audit_id: 'FA-US-1' }).query_ok === true);
@@ -148,20 +148,20 @@ const usParams = validate({
   status: 'COMPLIANT', from: '2026-09-01', to: '2026-09-30', limit: 10, offset: 5
 }).params;
 const indParams = validate({
-  region: 'IND', site_id: 'S1', record_id: 42, status: 'COMPLIANT',
+  region: 'IND', site_id: 'S1', record_id: 42, asset_tag: 'A1', status: 'COMPLIANT',
   from: '2026-09-01', to: '2026-09-30', limit: 10, offset: 5
 }).params;
 
 check('US emits 8 parameters', usParams.length === 8);
-check('IND emits 7 parameters', indParams.length === 7);
+check('IND emits 8 parameters', indParams.length === 8);
 check('US order is site, asset, audit, status, from, to, limit, offset',
   usParams[0] === 'S1' && usParams[1] === 'A1' && usParams[2] === 'ID1' &&
   usParams[3] === 'COMPLIANT' && usParams[4] === '2026-09-01T00:00:00.000Z' &&
   usParams[5] === '2026-09-30T00:00:00.000Z' && usParams[6] === 10 && usParams[7] === 5);
-check('IND order is site, record_id, status, from, to, limit, offset',
-  indParams[0] === 'S1' && indParams[1] === 42 && indParams[2] === 'COMPLIANT' &&
-  indParams[3] === '2026-09-01T00:00:00.000Z' &&
-  indParams[4] === '2026-09-30T00:00:00.000Z' && indParams[5] === 10 && indParams[6] === 5);
+check('IND order is site, record_id, asset_tag, status, from, to, limit, offset',
+  indParams[0] === 'S1' && indParams[1] === 42 && indParams[2] === 'A1' &&
+  indParams[3] === 'COMPLIANT' && indParams[4] === '2026-09-01T00:00:00.000Z' &&
+  indParams[5] === '2026-09-30T00:00:00.000Z' && indParams[6] === 10 && indParams[7] === 5);
 check('record_id is bound as a number, not a string (the column is integer)',
   typeof indParams[1] === 'number');
 check('omitted filters become null, never undefined (undefined breaks pg binding)',
@@ -185,8 +185,8 @@ check('QUERY_IND placeholder count matches the IND array length',
   placeholderCount(indSql) === indParams.length);
 check('US placeholders are contiguous $1..$8',
   Array.from({ length: 8 }, (_, i) => '$' + (i + 1)).every((p) => usSql.includes(p)));
-check('IND placeholders are contiguous $1..$6',
-  Array.from({ length: 6 }, (_, i) => '$' + (i + 1)).every((p) => indSql.includes(p)));
+check('IND placeholders are contiguous $1..$8',
+  Array.from({ length: 8 }, (_, i) => '$' + (i + 1)).every((p) => indSql.includes(p)));
 
 // --------------------------------------------------------- SQL properties
 console.log('\nSQL safety properties');
@@ -217,6 +217,34 @@ check('IND still selects audit_timestamp for display', /\baudit_timestamp\b/.tes
 check('IND selects the id primary key so a record can be addressed exactly',
   /^SELECT\s+id,/m.test(indSql));
 check('IND binds id as ::int, not ::text', /\$2::int\s+IS NULL OR id\s*=\s*\$2/.test(indSql));
+
+// --- migration 003 parity -------------------------------------------------
+console.log('\nIndia parity (migration 003: asset_tag, inspector_id, image_url)');
+check('IND selects asset_tag', /\basset_tag\b/.test(indSql));
+check('IND selects inspector_id', /\binspector_id\b/.test(indSql));
+check('IND selects image_url, so a retrieved record can show its evidence',
+  /\bimage_url\b/.test(indSql));
+check('IND can filter on asset_tag', /asset_tag\s*=\s*\$3/.test(indSql));
+
+const parityApplied = { limit: 25, site_id: 'S' };
+
+const indParity = shape('IND', parityApplied, [{
+  id: 7, site_id: 'S', status: 'COMPLIANT', violations: '[]',
+  asset_tag: 'EXT-502-01', inspector_id: 'TECH-9', image_url: 'https://x/y.png',
+  audit_timestamp: '2026-09-04T08:00:00Z', created_at: '2026-09-04T08:00:01Z'
+}]).rows[0];
+check('IND row exposes asset_tag', indParity.asset_tag === 'EXT-502-01');
+check('IND row exposes inspector_id', indParity.inspector_id === 'TECH-9');
+check('IND row exposes image_url', indParity.image_url === 'https://x/y.png');
+
+// Rows written before migration 003 have no such columns at all.
+const indLegacy = shape('IND', parityApplied, [{
+  id: 1, site_id: 'S', status: 'COMPLIANT', violations: '[]',
+  audit_timestamp: '2026-09-03T08:00:00Z'
+}]).rows[0];
+check('a pre-migration IND row yields null, not undefined, for the new columns',
+  indLegacy.asset_tag === null && indLegacy.inspector_id === null &&
+  indLegacy.image_url === null);
 check('webhook requires header auth',
   nodeByName.Webhook.parameters.authentication === 'headerAuth');
 check('both query nodes always output data, so a miss still reaches SHAPE_Results',
