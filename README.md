@@ -55,8 +55,9 @@ on that network.
 5. Activate the workflow.
 
 Optionally run `scripts/db/002_field_audit_logs_index.sql` to index the India
-table for site+date lookups. It is fully guarded — safe to re-run, and it skips
-cleanly if that table's shape differs from what the India workflow implies.
+table on `(site_id, created_at DESC)`. It carried only its primary-key index, so
+"audits for this site, newest first" was a sequential scan plus a sort. Fully
+guarded — safe to re-run, and it skips cleanly if the table's shape differs.
 
 ### Safety properties
 
@@ -75,13 +76,27 @@ cleanly if that table's shape differs from what the India workflow implies.
 | | `field_audit_us_logs` | `field_audit_logs` (India) |
 |---|---|---|
 | Source of truth | `scripts/db/001_field_audit_us_logs.sql` | none — created ad hoc |
-| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 7 |
-| Primary key | `audit_id` | none known |
-| Filters | site, asset tag, audit id, status, date range | site, status, date range |
+| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 9 |
+| Primary key | `audit_id` (text, minted) | `id` (integer, serial) |
+| `audit_timestamp` type | `timestamptz` | **`text`** |
+| Range filter / ordering | `audit_timestamp` | `created_at` (see below) |
+| Filters | site, asset tag, audit id, status, date range | site, record id, status, date range |
 
 `asset_tag` and `audit_id` filters are **rejected** for `IND` rather than
 ignored — silently dropping a filter would return rows the caller did not ask
-for, which on an audit log is worse than an error.
+for, which on an audit log is worse than an error. India records are addressed by
+`record_id`, its integer primary key, which the API exposes as the `audit_id`
+analogue.
+
+**India range filtering uses `created_at`, not `audit_timestamp`.** That column is
+`text` on this table, and `text >= timestamptz` has no operator in Postgres — the
+comparison raises `operator does not exist`. `created_at` is a real `timestamptz`
+written by `DEFAULT now()` in the same statement, so for range purposes it is the
+same instant. Ordering uses it too: ordering by the text column only appears
+correct because every value happens to be a fixed-width ISO-8601 `Z` string,
+which makes lexicographic order match chronological order — true today, silently
+wrong the first time anything writes a different format. `audit_timestamp` is
+still returned, because it is what the record should display.
 
 `impairment_notice` and `scope_note` are rendered at audit time and never
 persisted, so a retrieved US record shows that an impairment was suspected and

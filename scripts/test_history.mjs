@@ -91,13 +91,26 @@ check('blank strings do not count as a filter',
   validate({ region: 'US', site_id: '   ' }).error_code === 'FILTER_REQUIRED');
 
 // ------------------------------------------------------- region asymmetry
-console.log('\nregion asymmetry (India has 7 columns, no audit_id / asset_tag)');
+console.log('\nregion asymmetry (India: 9 columns, no audit_id / asset_tag, but an id PK)');
 check('IND rejects an asset_tag filter rather than ignoring it',
   validate({ region: 'IND', asset_tag: 'EXT-1' }).error_code === 'FILTER_UNSUPPORTED_FOR_REGION');
 check('IND rejects an audit_id filter rather than ignoring it',
   validate({ region: 'IND', audit_id: 'FA-US-1' }).error_code === 'FILTER_UNSUPPORTED_FOR_REGION');
 check('US accepts asset_tag', validate({ region: 'US', asset_tag: 'EXT-1' }).query_ok === true);
 check('US accepts audit_id', validate({ region: 'US', audit_id: 'FA-US-1' }).query_ok === true);
+
+// India has no minted audit_id, but it does have an integer primary key.
+check('IND accepts record_id', validate({ region: 'IND', record_id: 7 }).query_ok === true);
+check('record_id alone satisfies the mandatory-filter rule',
+  validate({ region: 'IND', record_id: 7 }).applied.record_id === 7);
+check('US rejects record_id (that is the IND analogue of audit_id)',
+  validate({ region: 'US', record_id: 7 }).error_code === 'FILTER_UNSUPPORTED_FOR_REGION');
+check('rejects a non-integer record_id',
+  validate({ region: 'IND', record_id: 'abc' }).error_code === 'RECORD_ID_INVALID');
+check('rejects a zero record_id',
+  validate({ region: 'IND', record_id: 0 }).error_code === 'RECORD_ID_INVALID');
+check('rejects a negative record_id',
+  validate({ region: 'IND', record_id: -5 }).error_code === 'RECORD_ID_INVALID');
 
 // ------------------------------------------------------------------ status
 console.log('\nstatus');
@@ -135,20 +148,22 @@ const usParams = validate({
   status: 'COMPLIANT', from: '2026-09-01', to: '2026-09-30', limit: 10, offset: 5
 }).params;
 const indParams = validate({
-  region: 'IND', site_id: 'S1', status: 'COMPLIANT',
+  region: 'IND', site_id: 'S1', record_id: 42, status: 'COMPLIANT',
   from: '2026-09-01', to: '2026-09-30', limit: 10, offset: 5
 }).params;
 
 check('US emits 8 parameters', usParams.length === 8);
-check('IND emits 6 parameters', indParams.length === 6);
+check('IND emits 7 parameters', indParams.length === 7);
 check('US order is site, asset, audit, status, from, to, limit, offset',
   usParams[0] === 'S1' && usParams[1] === 'A1' && usParams[2] === 'ID1' &&
   usParams[3] === 'COMPLIANT' && usParams[4] === '2026-09-01T00:00:00.000Z' &&
   usParams[5] === '2026-09-30T00:00:00.000Z' && usParams[6] === 10 && usParams[7] === 5);
-check('IND order is site, status, from, to, limit, offset',
-  indParams[0] === 'S1' && indParams[1] === 'COMPLIANT' &&
-  indParams[2] === '2026-09-01T00:00:00.000Z' &&
-  indParams[3] === '2026-09-30T00:00:00.000Z' && indParams[4] === 10 && indParams[5] === 5);
+check('IND order is site, record_id, status, from, to, limit, offset',
+  indParams[0] === 'S1' && indParams[1] === 42 && indParams[2] === 'COMPLIANT' &&
+  indParams[3] === '2026-09-01T00:00:00.000Z' &&
+  indParams[4] === '2026-09-30T00:00:00.000Z' && indParams[5] === 10 && indParams[6] === 5);
+check('record_id is bound as a number, not a string (the column is integer)',
+  typeof indParams[1] === 'number');
 check('omitted filters become null, never undefined (undefined breaks pg binding)',
   validate({ region: 'US', site_id: 'S' }).params.slice(1, 6).every((p) => p === null));
 
@@ -182,8 +197,26 @@ check('read-only: no write verb in either query',
   !/\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|GRANT)\b/i.test(allSql));
 check('no SELECT * (a schema change must error, not silently drop fields)',
   !/SELECT\s+\*/i.test(allSql));
-check('to bound is exclusive', /audit_timestamp\s*<\s*\$/.test(allSql));
-check('ordered newest first', /ORDER BY audit_timestamp DESC/.test(usSql));
+check('to bound is exclusive', /_at\s*<\s*\$|timestamp\s*<\s*\$/.test(allSql));
+check('US orders newest first on its timestamptz column',
+  /ORDER BY audit_timestamp DESC/.test(usSql));
+
+// --- regression guards for the India column-type bug ---------------------
+// field_audit_logs.audit_timestamp is TEXT. Comparing it to a timestamptz
+// parameter raises "operator does not exist: text >= timestamp with time zone",
+// and ordering by it only looks right because the values happen to be
+// fixed-width ISO-8601 Z strings. Both must use created_at, a real timestamptz.
+console.log('\nIndia column types (audit_timestamp is TEXT)');
+check('IND does NOT compare audit_timestamp against a parameter',
+  !/audit_timestamp\s*(>=|<|=)\s*\$/.test(indSql));
+check('IND range filter uses created_at', /created_at\s*>=\s*\$/.test(indSql) &&
+  /created_at\s*<\s*\$/.test(indSql));
+check('IND orders by created_at, not the text column',
+  /ORDER BY created_at DESC/.test(indSql) && !/ORDER BY audit_timestamp/.test(indSql));
+check('IND still selects audit_timestamp for display', /\baudit_timestamp\b/.test(indSql));
+check('IND selects the id primary key so a record can be addressed exactly',
+  /^SELECT\s+id,/m.test(indSql));
+check('IND binds id as ::int, not ::text', /\$2::int\s+IS NULL OR id\s*=\s*\$2/.test(indSql));
 check('webhook requires header auth',
   nodeByName.Webhook.parameters.authentication === 'headerAuth');
 check('both query nodes always output data, so a miss still reaches SHAPE_Results',
@@ -232,6 +265,18 @@ check('IND row exposes the absent US fields as empty, not undefined',
   Array.isArray(indRow.deficiencies) && indRow.deficiencies.length === 0 &&
   indRow.audit_id === null);
 check('IND row is flagged as retrieved', indRow.retrieved === true && indRow.region === 'IND');
+
+const indKeyed = shape('IND', applied, [{
+  id: 91, site_id: 'S', status: 'COMPLIANT', violations: '[]',
+  audit_timestamp: '2026-09-03T08:13:00.000Z', created_at: '2026-09-03T08:13:01Z'
+}]).rows[0];
+check('IND row exposes the integer primary key as record_id', indKeyed.record_id === 91);
+check('IND row carries created_at through', indKeyed.created_at === '2026-09-03T08:13:01.000Z');
+check('IND falls back to created_at if the text timestamp is unusable',
+  shape('IND', applied, [{
+    id: 1, site_id: 'S', violations: '[]',
+    audit_timestamp: 'not a date', created_at: '2026-09-03T08:13:01Z'
+  }]).rows[0].audit_timestamp === '2026-09-03T08:13:01.000Z');
 
 const indBadJson = shape('IND', applied, [{
   site_id: 'S', status: 'COMPLIANT', violations: 'not json at all',
