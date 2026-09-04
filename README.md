@@ -132,8 +132,21 @@ Vercel, with no code change. Set them per deployment so each customer has its
 own credential.
 
 ```bash
-openssl rand -base64 32     # AUDIT_ACCESS_PASSWORD
+openssl rand -hex 24        # AUDIT_ACCESS_PASSWORD
 ```
+
+Prefer hex over `-base64`: you have to type this into a browser prompt, and
+base64's `+`, `/` and trailing `=` are easy to mistype and easy to lose from the
+end of a copy-paste.
+
+Surrounding whitespace is trimmed from both variables, so a trailing newline
+picked up from a pasted value or a piped `printf` will not lock you out. On a
+rejected attempt the middleware logs a non-secret diagnostic to the Vercel
+runtime log — which half failed, the two lengths, and whether either stored value
+had surrounding whitespace.
+
+**Locked out?** Delete either variable and redeploy. The middleware is inert
+unless both are set, so that is the emergency exit.
 
 What this is not: one shared credential, no logout, no per-user attribution. It
 closes the spend hole and gates the URL. Real accounts arrive with sign-off,
