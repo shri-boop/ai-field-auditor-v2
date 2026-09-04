@@ -427,7 +427,7 @@ Verified working in production as of 2026-09-04.
 | Work order / CMMS push | ⚠️ node ships **disabled** — see 11.3 |
 | Sign-off (`signoff_by` / `signoff_at`) | ❌ **no write path exists** — see 11.1 |
 | Server-generated PDF | ❌ not built |
-| n8n webhook authentication | ❌ **audit webhooks are open** — see 11.4 |
+| n8n webhook authentication | ⚠️ code shipped; **bind the credential in n8n** — see 11.4 |
 
 ---
 
@@ -530,16 +530,55 @@ Remaining:
   `audit_id` is already passed as `external_id` for exactly this.
 - Replace silent failure with a real error path once a target exists.
 
-### 11.4 Authenticate the n8n audit webhooks
+### ✅ 11.4 Authenticate the n8n audit webhooks — CODE SHIPPED, needs binding in n8n
 
-**The live gap.** `/webhook/audit-field-photo-us` and `/webhook/audit-field-photov2`
-have `authentication: NONE`. The Basic auth added to the app protects the *app*,
-not the *engine* — anyone who learns a webhook URL can run audits directly, and
-every audit is a paid vision call.
+Both audit webhooks had `authentication: NONE`. The Basic auth on the app protects
+the *app*, not the *engine* — anyone who learned a webhook URL could run audits
+directly, and every audit is a paid vision call. `/webhook/audit-history` had used
+Header Auth from the start; this brings the audit endpoints to the same footing.
 
-`/webhook/audit-history` already uses Header Auth and is the pattern to copy: an
-`httpHeaderAuth` credential on the webhook, the secret injected server-side by the
-proxy route, never reaching the browser.
+**What is in the repo:**
+
+- `app/api/audit/route.ts` sends header **`x-audit-api-key`**, read from
+  `AUDIT_API_KEY` with optional `AUDIT_API_KEY_IND` / `AUDIT_API_KEY_US` overrides.
+- Both workflow JSONs carry `authentication: headerAuth` on the webhook node, with
+  **no credentials block** — the credential ID is minted by n8n and cannot be
+  committed, so the webhook fails closed until it is bound.
+- A 401/403 from n8n is translated to `AUDIT_AUTH_REJECTED` naming the webhook, the
+  header and the env var to check. Without it, n8n's non-JSON rejection would
+  surface as "the engine returned a non-JSON response", which points nowhere.
+
+**One header name for both regions**, because `/api/audit` is a single proxy serving
+both; a per-region header name would mean looking up which name to send. The two
+n8n credentials (`Audit IND Key`, `Audit US Key`) differ only in label, and may
+later differ in value.
+
+**Deliberately a different secret from `HISTORY_API_KEY`.** Records are read-only;
+these two spend money per call. Sharing one secret means handing the records key to
+a BI tool or a client dashboard also hands over unlimited model spend, with no way
+to revoke one without breaking the other.
+
+**`AUDIT_API_KEY` unset fails OPEN** — no header is sent, which is exactly the
+previous behaviour, and a warning is logged per audit. That is the migration path,
+not the destination: failing closed would mean deploying the code took every audit
+down before anyone could configure it. Once the credential is bound the silence
+ends, because n8n starts returning 403.
+
+#### ⚠️ Remaining steps, in this order
+
+Getting these backwards takes **both** regions down.
+
+1. Deploy the code. Harmless — n8n ignores a header it is not checking.
+2. Set `AUDIT_API_KEY` in Vercel, then **redeploy** (env changes need one).
+3. In n8n, create two `httpHeaderAuth` credentials, both with header name
+   `x-audit-api-key` and the same value.
+4. Bind them to the two webhook nodes.
+
+For step 4, **prefer the n8n UI over re-importing** — bind the credential and set
+Authentication to Header Auth on the webhook node by hand. Re-importing works, but
+between the import landing and the credential being bound the webhook rejects
+everything. The JSON change exists so a *future* re-import does not silently revert
+the setting.
 
 ### 11.5 Server-generated PDF
 

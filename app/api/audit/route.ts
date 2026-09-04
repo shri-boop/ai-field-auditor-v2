@@ -28,9 +28,47 @@ export const maxDuration = 300;
 /** Leave headroom under maxDuration so we return a real message, not a 504. */
 const UPSTREAM_TIMEOUT_MS = Number(process.env.AUDIT_TIMEOUT_MS ?? 240_000);
 
+/**
+ * Must match the header name on the n8n Header Auth credentials bound to BOTH
+ * audit webhooks.
+ *
+ * One header name for both regions, deliberately: this route is a single proxy
+ * serving both, so a per-region header name would mean looking up which name to
+ * send — branching that buys nothing. The two credentials differ only in their
+ * n8n label and (potentially) their value.
+ *
+ * Distinct from x-audit-history-key on purpose. The records endpoint is read-only;
+ * these two spend money on every call. Sharing one secret across both would mean
+ * that handing the records key to a BI tool or a client dashboard also hands over
+ * unlimited model spend, with no way to revoke one without breaking the other.
+ */
+const AUTH_HEADER = 'x-audit-api-key';
+
 function n8nBaseUrl(): string {
   const raw = (process.env.N8N_BASE_URL ?? 'https://n8n.kratuailabs.com').trim();
   return raw.replace(/\/+$/, '');
+}
+
+/**
+ * Per-region key with a shared fallback.
+ *
+ * AUDIT_API_KEY covers both regions, which is the expected setup. AUDIT_API_KEY_IND
+ * and AUDIT_API_KEY_US override it, so the day one region's key has to be rotated
+ * independently — a US customer calling their webhook directly, say — it is an
+ * environment change rather than a code change.
+ *
+ * Literal lookups rather than process.env[`AUDIT_API_KEY_${region}`]: a dynamic key
+ * defeats static analysis in some bundling modes, and this value decides whether an
+ * audit is authenticated at all.
+ *
+ * Trimmed for the reason /api/history documents: `fetch` throws TypeError on a
+ * header value containing a newline, and that would surface below as
+ * UPSTREAM_UNREACHABLE — blaming the network for a trailing newline picked up
+ * pasting a key into Vercel.
+ */
+function auditApiKey(region: 'IND' | 'US'): string | undefined {
+  const perRegion = region === 'US' ? process.env.AUDIT_API_KEY_US : process.env.AUDIT_API_KEY_IND;
+  return perRegion?.trim() || process.env.AUDIT_API_KEY?.trim() || undefined;
 }
 
 export async function POST(request: Request) {
@@ -120,12 +158,38 @@ export async function POST(request: Request) {
   const target = `${n8nBaseUrl()}/webhook/${regionDef.webhookPath}`;
   const startedAt = Date.now();
 
+  // ------------------------------------------------------------------- auth
+  const apiKey = auditApiKey(region);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey) {
+    headers[AUTH_HEADER] = apiKey;
+  } else {
+    /**
+     * DELIBERATELY FAILS OPEN, and this is a migration path rather than the
+     * destination.
+     *
+     * Failing closed here would mean that deploying this code before the
+     * environment variable is set takes every audit down — an outage caused by
+     * shipping, before anyone has had a chance to configure anything. Sending no
+     * header preserves exactly today's behaviour, which is what allows the safe
+     * rollout order: deploy the code (n8n ignores a header it is not checking),
+     * then set the key, then bind the credentials in n8n.
+     *
+     * Once the credential IS bound, an unset key stops being silent: n8n returns
+     * 403 and the handler below says precisely what is wrong.
+     */
+    console.warn(
+      `[audit] AUDIT_API_KEY is not set — calling ${regionDef.webhookPath} unauthenticated. ` +
+        'Anyone who knows the webhook URL can spend model credits. See .env.example.',
+    );
+  }
+
   // --------------------------------------------------------------- dispatch
   let upstream: Response;
   try {
     upstream = await fetch(target, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       cache: 'no-store',
@@ -149,6 +213,29 @@ export async function POST(request: Request) {
   }
 
   const text = await upstream.text();
+
+  // n8n's own rejection for a missing or mismatched Header Auth credential is not
+  // JSON, so without this it would fall through to UPSTREAM_NOT_JSON — "the engine
+  // returned a non-JSON response" — which points nowhere useful. This is the single
+  // most likely failure the first time the credential is bound, and on any later
+  // key rotation, so it names the exact thing to check.
+  if (upstream.status === 401 || upstream.status === 403) {
+    return NextResponse.json(
+      {
+        status: 'ERROR',
+        error_code: 'AUDIT_AUTH_REJECTED',
+        error:
+          `The ${region} audit workflow rejected the request key. Confirm the n8n Header Auth ` +
+          `credential is bound to the ${regionDef.webhookPath} webhook, uses header ` +
+          `"${AUTH_HEADER}", and that its value matches ` +
+          `${region === 'US' ? 'AUDIT_API_KEY_US' : 'AUDIT_API_KEY_IND'} or AUDIT_API_KEY.` +
+          (apiKey ? '' : ' No key is currently configured on this deployment.'),
+        upstream_status: upstream.status,
+        region,
+      },
+      { status: 502 },
+    );
+  }
 
   // n8n returns JSON for both the 200 and the structured 400 from
   // RESPOND_BadRequest. Pass the status through so the client can distinguish

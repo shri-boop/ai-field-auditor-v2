@@ -559,6 +559,19 @@ section('9. AI_Field_Audit_v2.json wiring');
 
   check('the webhook path is unchanged (lib/regions.ts depends on it)',
     by.Webhook.parameters.path === 'audit-field-photov2');
+
+  // Every audit is a paid vision call, so an open webhook is a metered spend
+  // endpoint. audit-history has required Header Auth from the start.
+  check('the audit webhook requires Header Auth',
+    by.Webhook.parameters.authentication === 'headerAuth');
+  // The credential ID is minted by n8n and must not be committed. Absent means the
+  // webhook rejects everything until it is bound in the UI, which is the correct
+  // default for this endpoint.
+  check('no credential is committed for the webhook (fails closed until bound)',
+    by.Webhook.credentials === undefined);
+  check('the proxy sends the header the credential will check',
+    readFileSync(join(REPO, 'app', 'api', 'audit', 'route.ts'), 'utf8')
+      .indexOf("AUTH_HEADER = 'x-audit-api-key'") !== -1);
   check('LOG_Audit still targets field_audit_logs, not the US table',
     by.LOG_Audit.parameters.table.value === 'field_audit_logs');
   check('the workflow still ships active: true, matching production', wf.active === true);
