@@ -98,6 +98,21 @@ NEW_COLUMNS = {
     "image_url": "={{ $json.image_url }}",
 }
 
+# Alert recipient for the Gmail node, matching ALERT_RECIPIENT in
+# build_us_workflow.py.
+#
+# Was a hardcoded personal Gmail address. The node ships disabled, so nothing was
+# ever sent there — but the moment anyone enabled it, a customer's fire-safety
+# findings would have gone to an individual's personal mailbox.
+#
+# Resolved from the n8n environment at run time with a role-address fallback, so
+# the failure mode is "goes to a company inbox", never "goes to a person".
+# Deliberately NOT from the request body: the audit webhook is unauthenticated, so
+# a caller-supplied recipient would make it an open email relay on our Gmail
+# credential.
+ALERT_RECIPIENT = "={{ $env.AUDIT_ALERT_EMAIL_TO || 'alerts@kratuailabs.com' }}"
+GMAIL_NODE = "Send a message"
+
 
 def schema_entry(name):
     return {
@@ -134,6 +149,9 @@ def main():
         values[name] = expression
         if name not in existing:
             schema.append(schema_entry(name))
+
+    if GMAIL_NODE in by_name:
+        by_name[GMAIL_NODE]["parameters"]["sendTo"] = ALERT_RECIPIENT
 
     # Guard the table name: this workflow writes the India log, and pointing it at
     # the US table would corrupt a differently-shaped table.

@@ -32,9 +32,17 @@ Two things to know before re-importing it into n8n:
 
 The US workflow is a **build artifact**. Its logic lives in `scripts/nodes/*.js`;
 regenerate with `python3 scripts/build_us_workflow.py` and test offline with
-`node scripts/test_pipeline.mjs`. See
-**[docs/US_FIRE_AUDIT_WORKFLOW.md](docs/US_FIRE_AUDIT_WORKFLOW.md)** for the
-architecture, API contract, database migration and known limitations.
+`node scripts/test_pipeline.mjs`.
+
+Per-region documentation — architecture, API contract, migrations, current state
+and roadmap:
+
+- **[docs/US_FIRE_AUDIT_WORKFLOW.md](docs/US_FIRE_AUDIT_WORKFLOW.md)** — IFC / NFPA
+- **[docs/IND_FIRE_AUDIT_WORKFLOW.md](docs/IND_FIRE_AUDIT_WORKFLOW.md)** — NBC 2016 / CFO Mumbai
+
+The two are **not** mirror images. India is the original build and lacks the
+hardening the US workflow was designed with — derived status, severity tiers, SSRF
+guard, retries, offline tests. The India document opens with the full comparison.
 
 ## Configuration
 

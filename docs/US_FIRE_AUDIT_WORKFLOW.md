@@ -399,6 +399,173 @@ the columns exist (`signoff_by`, `signoff_at`) and no interface writes them.
   than one account per region.
 - **No frontend rate limiting.** `/api/upload` accepts any image and `/api/audit`
   will forward it, so an unauthenticated caller can spend model credits.
-- **SQL is unverified against a live server** — no Postgres was available in the
-  authoring environment. It is reviewed and column-consistency is enforced by
-  test, but run it against staging first.
+---
+
+## 10. Current state
+
+Verified working in production as of 2026-09-04.
+
+| Capability | State |
+|---|---|
+| Jurisdiction-resolved audit (9 jurisdictions) | ✅ live — verified on Florida, citing FFPC / NFPA 1 / NFPA 101 with no IFC chapters |
+| Vision fallback (Sonnet 4.5 → GPT-4o) | ✅ live |
+| Persistence to `field_audit_us_logs` | ✅ live |
+| Region switch, scoped per deployment | ✅ live (`ENABLED_REGIONS`) |
+| Records: search, open, print | ✅ live |
+| Printable record (Ctrl+P → PDF) | ✅ live — ink letterhead, evidence plate, sign-off block |
+| Filename from record identity | ✅ live |
+| Basic auth over app + API | ✅ live, opt-in via `AUDIT_ACCESS_*` |
+| Prior-audit context on site entry | ✅ live |
+| Slack + Telegram alerts | ✅ live |
+| Email alerts | ⚠️ node ships **disabled** — see 11.2 |
+| Work order / CMMS push | ⚠️ node ships **disabled** — see 11.3 |
+| Sign-off (`signoff_by` / `signoff_at`) | ❌ **no write path exists** — see 11.1 |
+| Server-generated PDF | ❌ not built |
+| n8n webhook authentication | ❌ **audit webhooks are open** — see 11.4 |
+
+---
+
+## 11. Roadmap — next phases
+
+Ordered by what a US buyer's compliance process will actually ask for.
+
+### 11.1 Sign-off — the one that changes what this product *is*
+
+**Priority: highest.** Everything else is polish by comparison.
+
+`signoff_status` is written as `PENDING` at insert and never changes. `signoff_by`,
+`signoff_at` and `signoff_notes` exist in migration 001, are read by the history
+workflow, and render on the printed record when populated — but **nothing can
+populate them.** The history workflow is `SELECT`-only, asserted by test, and there
+is no other write path. Those columns are plumbed end-to-end for reading and are
+structurally incapable of being filled.
+
+This is what turns the product from *advisory screening* into a *defensible
+record*, and it is a different order of work from everything so far. It needs four
+things, none of which exist:
+
+1. **Identity — real accounts, not a shared credential.** Access today is one
+   HTTP Basic credential per deployment. `KRATU_2026_FIREAUDIT` is not a person and
+   holds no licence. A signature that resolves to a shared credential is worthless,
+   and worse than worthless in Florida, where firesafety inspections are reserved
+   to inspectors certified under s. 633.216, F.S.
+2. **A write endpoint.** The first write path in the system. Vercel cannot reach
+   Postgres — it has no `ports:` mapping and should not get one — so this means a
+   new n8n workflow performing a scoped `UPDATE`, reached through a proxy route,
+   mirroring how `/api/history` reads.
+3. **An audit trail of who signed what.** A sign-off that can be silently
+   overwritten is not a sign-off. `signoff_status` already has a `SUPERSEDED` state
+   in its CHECK constraint, which is the hook for this.
+4. **A sign-off UI**, including capture of the reviewer's licence or certification
+   number — the field a printed record currently leaves as a ruled line.
+
+**Open architectural decision:** where the user store lives. The n8n Postgres
+(consistent with everything else, but every read becomes a workflow), a separate
+managed Postgres reachable from Vercel (simpler app code, second database to
+operate), or a hosted identity provider (fastest to correct, adds a dependency and
+a per-seat cost). This needs deciding before any of it is built.
+
+### 11.2 Email alerts — recipient fixed, node still disabled
+
+`SEND_Email` was hardcoded to a personal Gmail address. **The node ships
+`disabled: true`, so nothing was ever sent there** — but enabling it in a hurry
+would have routed a customer's fire-safety findings to an individual's mailbox.
+
+The recipient now resolves from the n8n environment with a role-address fallback:
+
+```
+={{ $env.AUDIT_ALERT_EMAIL_TO || 'alerts@kratuailabs.com' }}
+```
+
+So the worst case is a company inbox, never a person. Deliberately **not** taken
+from the request body: the audit webhook is unauthenticated (11.4), so a
+caller-supplied recipient would make it an open email relay on our Gmail
+credential.
+
+Remaining before enabling:
+- Set `AUDIT_ALERT_EMAIL_TO` on the n8n container per deployment, so a US
+  customer's alerts reach *their* distribution list.
+- Agree the distribution list — a CRITICAL finding email is an escalation, and who
+  receives it is a contractual question, not a technical one.
+- Verify the Gmail credential's sending domain is SPF/DKIM-aligned, or these land
+  in spam and the escalation silently fails.
+- Decide whether the report PDF should be attached. Today the body is an alert, not
+  a report; attaching one requires 11.5.
+
+### 11.3 Work order / CMMS integration — seam exists, target does not
+
+`CREATE_WorkOrder` posts a P1 payload (`external_id`, `site_id`, asset, summary,
+`impairment_notice`, `due_at`, `risk_score`) to
+`{{ $env.FIREHAWK_WORKORDER_WEBHOOK }}` on the CRITICAL route only. It ships
+`disabled: true`.
+
+Note that if it were enabled with that variable unset, the URL would be empty and
+the request would fail — and `onError: continueRegularOutput` means it would fail
+**silently**, so a blocked fire exit would raise no work order and no error. Do not
+enable it without confirming the target responds.
+
+Remaining:
+- Choose the target system (ServiceNow, Salesforce Field Service, Maximo,
+  ServiceTrade, Inspect Point) — this is a customer-driven choice, not ours.
+- Map severity to that system's priority scheme; `P1` is a placeholder.
+- Add idempotency so a retried audit does not open duplicate work orders.
+  `audit_id` is already passed as `external_id` for exactly this.
+- Replace silent failure with a real error path once a target exists.
+
+### 11.4 Authenticate the n8n audit webhooks
+
+**The live gap.** `/webhook/audit-field-photo-us` and `/webhook/audit-field-photov2`
+have `authentication: NONE`. The Basic auth added to the app protects the *app*,
+not the *engine* — anyone who learns a webhook URL can run audits directly, and
+every audit is a paid vision call.
+
+`/webhook/audit-history` already uses Header Auth and is the pattern to copy: an
+`httpHeaderAuth` credential on the webhook, the secret injected server-side by the
+proxy route, never reaching the browser.
+
+### 11.5 Server-generated PDF
+
+Browser print covers the everyday case. A generated PDF (`@react-pdf/renderer`
+behind `/api/report`) would allow a report for any `audit_id` without a browser —
+which is what emailing a report, attaching one to a work order, or bulk-generating
+for a portfolio all require. Deliberately deferred until retrieval existed; it now
+does.
+
+### 11.6 Smaller, still open
+
+- **Editions need confirmation.** Only NFPA 10 (2022) verified against a primary
+  source; the rest are flagged, not silently asserted.
+- **Registry covers 9 jurisdictions.** Everything else falls back to IFC 2024 with
+  `code_basis_confident: false`.
+- **Timezone is per state, not per site.** A `timezone` field on the request would
+  fix it.
+- **No image authenticity checks** — no EXIF, GPS or capture-time validation, so
+  nothing prevents an old or unrelated photo.
+- **`code_reference` strings are model-generated** — plausible but unverified
+  clause numbers. Pointers for a reviewer, not authority. This is precisely why
+  11.1 matters.
+- **No rate limiting** on `/api/upload` or `/api/audit`.
+- **Vercel Blob URLs are public and permanent.** Fine for a demo; a client should
+  use their own bucket. The SSRF allow-list already accepts S3, R2, Azure and GCS,
+  and presigned URLs pass, so no code change is needed.
+- **`AI_Field_Audit.json` is dead** — the original 9-node prototype, referenced by
+  nothing.
+
+---
+
+## 12. Known limitations (design, not backlog)
+
+These are consequences of the approach rather than things to fix.
+
+- **A photograph cannot certify compliance.** `advisory_only: true`,
+  `certification_eligible: false` and `unverifiable_items` are the honest boundary,
+  not a placeholder for a future feature.
+- **Region gating is deployment scoping, not authentication.** `ENABLED_REGIONS`
+  keeps an India customer off the US workflow because they are served by a
+  different Vercel project. It does not identify *who* is using a deployment.
+- **`impairment_notice` and `scope_note` are not persisted.** Both are composed at
+  audit time, so a retrieved record shows the impairment basis but not the full
+  NFPA 25 Ch. 15 checklist. The record says so rather than implying no action was
+  required.
+- **SQL was authored without a live server.** Column consistency is enforced by
+  test; `001` and `002` have since been applied successfully.

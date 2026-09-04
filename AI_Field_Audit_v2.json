@@ -341,7 +341,7 @@
     },
     {
       "parameters": {
-        "sendTo": "shrinand.shirwal84@gmail.com",
+        "sendTo": "={{ $env.AUDIT_ALERT_EMAIL_TO || 'alerts@kratuailabs.com' }}",
         "subject": "={{ $json.email_subject }}",
         "message": "={{ $json.alert }}",
         "options": {
