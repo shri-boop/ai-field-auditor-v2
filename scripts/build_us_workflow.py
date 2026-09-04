@@ -33,6 +33,24 @@ FALLBACK_MODEL = "openai/gpt-4o"
 DB_TABLE = "field_audit_us_logs"
 WEBHOOK_PATH = "audit-field-photo-us"
 
+# Alert recipient for SEND_Email.
+#
+# Was a hardcoded personal Gmail address. The node ships disabled, so nothing was
+# ever actually sent there — but the moment anyone enabled it, a US customer's
+# fire-safety findings would have gone to an individual's personal mailbox. That is
+# a data-handling problem waiting to happen, and it is the kind of default that
+# gets enabled in a hurry and never revisited.
+#
+# Now resolved from the n8n environment at run time, with a role-address fallback
+# so the failure mode is "goes to a company inbox", never "goes to a person".
+# Set AUDIT_ALERT_EMAIL_TO on the n8n container to route per deployment — a US
+# customer's alerts should reach their own distribution list, not ours.
+#
+# Deliberately NOT taken from the request body. The audit webhook is currently
+# unauthenticated, so a caller-supplied recipient would turn it into an open email
+# relay running on our Gmail credential.
+ALERT_RECIPIENT = "={{ $env.AUDIT_ALERT_EMAIL_TO || 'alerts@kratuailabs.com' }}"
+
 
 def js(filename):
     with open(os.path.join(NODES, filename), "r", encoding="utf-8") as fh:
@@ -270,7 +288,7 @@ def build():
 
     nodes.append({
         "parameters": {
-            "sendTo": "shrinand.shirwal84@gmail.com",
+            "sendTo": ALERT_RECIPIENT,
             "subject": "={{ $json.email_subject }}",
             "emailType": "html",
             "message": "={{ $json.email_html }}",
@@ -278,6 +296,7 @@ def build():
         },
         "id": "us-email-0014",
         "name": "SEND_Email",
+        # Recipient: see ALERT_RECIPIENT above.
         "type": "n8n-nodes-base.gmail",
         "typeVersion": 2.2,
         "position": [-140, 470],
