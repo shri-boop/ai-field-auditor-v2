@@ -11,16 +11,31 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v
 | `AI_Field_Audit_US.json` | United States | IFC 2024 / NFPA 1 + NFPA 10, 25, 72, 80, 96, 101, 110, with an OSHA 29 CFR 1910 overlay — resolved per jurisdiction at runtime | `/webhook/audit-field-photo-us` |
 | `AI_Field_Audit_History.json` | Both | Read-only records lookup over both audit logs | `/webhook/audit-history` |
 
-### The India workflow is hand-maintained
+### The India workflow is patched, not generated
 
-`AI_Field_Audit_v2.json` is not generated. Non-trivial edits to it go through
-`scripts/patch_india_workflow.py`, which is idempotent and keeps the change
-reviewable rather than buried in a hand-edit of a 500-line JSON blob. It currently
-threads `asset_tag`, `inspector_id` and `image_url` from the request through to
-`LOG_Audit`.
+`AI_Field_Audit_v2.json` is edited in place by `scripts/patch_india_workflow.py`,
+which is idempotent. It is not rebuilt from scratch like the US workflow, because it
+carries live credential references and an `active: true` flag that a from-scratch
+rebuild would be liable to drop.
 
-Two things to know before re-importing it into n8n:
+Its JavaScript still lives in files — `scripts/nodes/ind_*.js` — and the patch script
+writes those into the JSON. **Never hand-edit the JSON.**
 
+```bash
+node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
+python3 scripts/patch_india_workflow.py               # idempotent
+python3 scripts/patch_india_workflow.py --check       # verify committed JSON
+node scripts/test_india.mjs                           # 164 assertions, no n8n or DB
+```
+
+`test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
+its source file, so the tests cannot pass against code that is not what runs.
+
+Things to know before re-importing it into n8n:
+
+- **Apply `scripts/db/004_field_audit_logs_severity.sql` first.** The workflow writes
+  eleven new columns. Migration first is the safe order: until the import they stay
+  NULL and nothing changes. Import first and every insert fails on unknown columns.
 - **Update the existing workflow — do not import a second copy.** Two workflows
   registering `/webhook/audit-field-photov2` will conflict, and India audits break.
 - The file carries `"active": true`, matching production. Confirm it is still
@@ -28,7 +43,8 @@ Two things to know before re-importing it into n8n:
 - `DOWNLOAD_Image → EXTRACT_Base64` is an orphaned pair, left over from an earlier
   base64 approach. It is not in the executing chain
   (`Webhook → PARSE_Input → BUILD_Vision_Payload → Claude_Vision_API →
-  PARSE_Response → LOG_Audit`) and is left alone deliberately.
+  PARSE_Response → LOG_Audit → SHAPE_Response → IF_NonCompliant`) and is left alone
+  deliberately.
 
 The US workflow is a **build artifact**. Its logic lives in `scripts/nodes/*.js`;
 regenerate with `python3 scripts/build_us_workflow.py` and test offline with
@@ -41,9 +57,11 @@ and roadmap:
 - **[docs/IND_FIRE_AUDIT_WORKFLOW.md](docs/IND_FIRE_AUDIT_WORKFLOW.md)** — NBC 2016 / CFO Mumbai
 - **[docs/SIGNOFF_DESIGN.md](docs/SIGNOFF_DESIGN.md)** — sign-off design proposal (not built)
 
-The two are **not** mirror images. India is the original build and lacks the
-hardening the US workflow was designed with — derived status, severity tiers, SSRF
-guard, retries, offline tests. The India document opens with the full comparison.
+The two are **not** mirror images. India is the original build. It has since caught
+up on derived status, severity tiers, database-failure tolerance and offline tests,
+but still lacks the SSRF guard, structured HTTP 400s and model retries the US
+workflow was designed with — and its audit webhook is still unauthenticated. The
+India document opens with the full comparison.
 
 ## Configuration
 
@@ -126,8 +144,8 @@ guarded — safe to re-run, and it skips cleanly if the table's shape differs.
 
 | | `field_audit_us_logs` | `field_audit_logs` (India) |
 |---|---|---|
-| Source of truth | `scripts/db/001_field_audit_us_logs.sql` | created ad hoc; extended by `003` |
-| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 12 |
+| Source of truth | `scripts/db/001_field_audit_us_logs.sql` | created ad hoc; extended by `003` and `004` |
+| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 23; `deficiencies` jsonb and severity counts added by `004`; no `code_basis` snapshot, no sign-off |
 | Primary key | `audit_id` (text, minted) | `id` (integer, serial) |
 | `audit_timestamp` type | `timestamptz` | **`text`** |
 | Range filter / ordering | `audit_timestamp` | `created_at` (see below) |
@@ -143,6 +161,16 @@ table, bringing it to parity on the three fields that mattered: telling two
 devices at one site apart, recording who captured the evidence, and being able to
 show that evidence on a retrieved record. **Rows written before that migration
 have NULL in all three**, so an older India record still has no photograph.
+
+Migration `004` added the severity model — `deficiencies` jsonb, per-tier counts, a
+risk score, `image_quality` and the reinspect fields. The records lookup names those
+columns explicitly, so **`AI_Field_Audit_History.json` must not be re-imported until
+`004` is applied**, or every India lookup fails with
+`column "deficiencies" does not exist`.
+
+Rows written before `004` have NULL in all of them, and the lookup returns the counts
+as **`null` rather than `0`** — "0 critical findings" reads as a clean bill when in
+fact nothing was ever counted.
 
 **India range filtering uses `created_at`, not `audit_timestamp`.** That column is
 `text` on this table, and `text >= timestamptz` has no operator in Postgres — the
@@ -162,7 +190,7 @@ its basis, but not the full NFPA 25 Ch. 15 action checklist.
 
 ```bash
 node --check scripts/nodes/history_01_validate_query.js   # and _02
-node scripts/test_history.mjs                             # 57 assertions, no n8n or DB needed
+node scripts/test_history.mjs                             # 94 assertions, no n8n or DB needed
 python3 scripts/build_history_workflow.py                 # regenerate
 python3 scripts/build_history_workflow.py --check         # verify committed JSON
 ```

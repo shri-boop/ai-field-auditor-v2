@@ -32,8 +32,19 @@ export interface RegionDef {
   /** n8n webhook path (appended to N8N_BASE_URL). */
   webhookPath: string;
   /**
-   * Copy used while the audit is running and as a fallback when the response
-   * carries no code_basis of its own (the India workflow never does).
+   * Copy used while the audit is running, and as a fallback when the response
+   * carries no code_basis of its own.
+   *
+   * For IND this text is duplicated, deliberately and exactly, in
+   * scripts/nodes/ind_04_shape_response.js as `code_basis.fire_code`. India
+   * resolves no registry at run time — the basis is hardcoded in the prompt — so
+   * the workflow asserts a static basis, and it has to read identically to this
+   * string or a live audit would display less statute than a fallback. The
+   * offline suite (scripts/test_india.mjs) asserts the two are equal, so the
+   * duplication cannot drift silently.
+   *
+   * Records retrieved from the India table still fall back to this: nothing is
+   * snapshotted per row, because there was never a resolved basis to snapshot.
    */
   codeBasisFallback: string;
   /** Shown in the "zero findings" panel when the response has no code_basis. */
