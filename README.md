@@ -8,6 +8,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v
 |---|---|---|---|
 | `AI_Field_Audit_v2.json` | India | NBC 2016 + CFO Mumbai | `/webhook/audit-field-photov2` |
 | `AI_Field_Audit_US.json` | United States | IFC 2024 / NFPA 1 + NFPA 10, 25, 72, 80, 96, 101, 110, with an OSHA 29 CFR 1910 overlay — resolved per jurisdiction at runtime | `/webhook/audit-field-photo-us` |
+| `AI_Field_Audit_History.json` | Both | Read-only records lookup over both audit logs | `/webhook/audit-history` |
 
 The US workflow is a **build artifact**. Its logic lives in `scripts/nodes/*.js`;
 regenerate with `python3 scripts/build_us_workflow.py` and test offline with
@@ -28,6 +29,81 @@ hostname no longer ships in the browser bundle. See
 | `AUDIT_TIMEOUT_MS` | `240000` | How long the proxy waits on n8n before returning HTTP 504. |
 | `AUDIT_ACCESS_USER` | — | Basic-auth username. See Access control below. |
 | `AUDIT_ACCESS_PASSWORD` | — | Basic-auth password. Both must be set for auth to apply. |
+| `HISTORY_API_KEY` | — | Shared secret for the records webhook. Unset = records disabled. |
+| `HISTORY_TIMEOUT_MS` | `30000` | Records lookup timeout. |
+
+## Audit Records
+
+`AI_Field_Audit_History.json` — `POST /webhook/audit-history` — read-only
+retrieval over both audit logs, reached through `app/api/history/route.ts`.
+
+**Why it goes through n8n rather than querying Postgres directly:** the database
+has no `ports:` mapping in the stack's compose file, so it is reachable only on
+the internal docker network. Vercel cannot reach it, and that is correct —
+exposing Postgres to serve a history page would be a worse problem than the one
+it solves. n8n is already public, already holds the credential, and already sits
+on that network.
+
+### Setup
+
+1. Import `AI_Field_Audit_History.json` into n8n.
+2. Create an **httpHeaderAuth** credential — suggested name `Audit History Key` —
+   with header `x-audit-history-key` and a long random value.
+3. Bind it to the **Webhook** node. Until it is bound the webhook rejects every
+   request, which is the intended default for this endpoint.
+4. Set the same value as `HISTORY_API_KEY` in Vercel, then redeploy.
+5. Activate the workflow.
+
+Optionally run `scripts/db/002_field_audit_logs_index.sql` to index the India
+table for site+date lookups. It is fully guarded — safe to re-run, and it skips
+cleanly if that table's shape differs from what the India workflow implies.
+
+### Safety properties
+
+- **Positional SQL parameters only.** `site_id`, `asset_tag` and `status` are
+  caller-controlled and land in a `WHERE` clause; none of them reaches the query
+  text. Each region uses a fixed parameter count with optional filters written as
+  `($n IS NULL OR col = $n)`, so the array always aligns with the placeholders.
+- **At least one filter is mandatory.** Unbounded listing of an append-only
+  safety log is both a slow query and an enumeration primitive.
+- `limit` capped at 100.
+- **Read-only** — the workflow contains no write path.
+- Region allow-listed in the proxy, same as `/api/audit`.
+
+### The two regions are not symmetric
+
+| | `field_audit_us_logs` | `field_audit_logs` (India) |
+|---|---|---|
+| Source of truth | `scripts/db/001_field_audit_us_logs.sql` | none — created ad hoc |
+| Columns | ~40, incl. `deficiencies` jsonb, `code_basis` snapshot, sign-off | 7 |
+| Primary key | `audit_id` | none known |
+| Filters | site, asset tag, audit id, status, date range | site, status, date range |
+
+`asset_tag` and `audit_id` filters are **rejected** for `IND` rather than
+ignored — silently dropping a filter would return rows the caller did not ask
+for, which on an audit log is worse than an error.
+
+`impairment_notice` and `scope_note` are rendered at audit time and never
+persisted, so a retrieved US record shows that an impairment was suspected and
+its basis, but not the full NFPA 25 Ch. 15 action checklist.
+
+### Development
+
+```bash
+node --check scripts/nodes/history_01_validate_query.js   # and _02
+node scripts/test_history.mjs                             # 57 assertions, no n8n or DB needed
+python3 scripts/build_history_workflow.py                 # regenerate
+python3 scripts/build_history_workflow.py --check         # verify committed JSON
+```
+
+`test_history.mjs` runs under the same restricted sandbox as
+`test_pipeline.mjs`, and cross-checks the positional parameter array against the
+`$1..$n` placeholders in the generated SQL. Those two live in different files and
+nothing at runtime would notice them drifting — the query would simply bind
+`site_id` where it meant `status` and return confidently wrong rows.
+
+`AI_Field_Audit_History.json` is a **build artifact** — edit
+`scripts/nodes/history_*.js`, never the JSON.
 
 ### Access control
 
