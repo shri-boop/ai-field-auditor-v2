@@ -287,6 +287,12 @@ India is currently unverifiable except by running it in production.
 
 ### 7.8 Governance parity
 
+See **[SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md)** §12.5 — that proposal is
+Florida-shaped, and whether India needs sign-off at all is an open question. CFO
+Mumbai licensing is a different regime, so the credential enumeration would not
+transfer.
+
+
 India returns no `advisory_only`, no `certification_eligible`, no
 `unverifiable_items`, no sign-off columns. The UI supplies `advisory_only: true`
 for IND so the disclaimer still shows, but the workflow itself makes no such
