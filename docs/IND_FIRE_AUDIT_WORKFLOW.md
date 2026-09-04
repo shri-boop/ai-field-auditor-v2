@@ -7,9 +7,12 @@ This document covers `AI_Field_Audit_v2.json`.
 - **Workflow name:** `AI_Field_Audit_V2_URL_To_Base64`
 - **Webhook:** `POST /webhook/audit-field-photov2`
 - **Table:** `field_audit_logs`
-- **Code basis:** NBC 2016 + CFO Mumbai norms, **hardcoded in the prompt**
-- **Source of truth:** the JSON itself — this workflow is **hand-maintained**,
-  not generated
+- **Code basis:** NBC 2016 Part 4 with MFPLSM Act 2006 / Rules 2009 and IS 2190 /
+  IS 15683, **hardcoded in the prompt** (no runtime registry)
+- **Source of truth:** `scripts/nodes/ind_*.js`, written into the JSON by
+  `scripts/patch_india_workflow.py`. The JSON is **patched in place**, not
+  regenerated — see §6.
+- **Tests:** `node scripts/test_india.mjs` — 164 assertions, no n8n or database
 
 ---
 
@@ -22,21 +25,28 @@ confusion about this project comes from assuming otherwise.
 |---|---|---|
 | Origin | the original build, evolved in place | designed from scratch afterwards |
 | Code basis | one hardcoded prompt string | runtime registry, 9 jurisdictions |
-| Maintenance | hand-edited JSON | build artifact from `scripts/nodes/*.js` |
-| Nodes | 14 (2 orphaned) | 23 |
-| Test coverage | **none** | 106 offline assertions |
-| Status derivation | **the model's own `status` is trusted verbatim** | derived in code from severity counts |
-| Findings model | flat list of strings | CRITICAL / MAJOR / MINOR with SLA + citation |
+| Maintenance | JSON patched in place from `scripts/nodes/ind_*.js` | JSON generated whole from `scripts/nodes/*.js` |
+| Nodes | 15 (2 orphaned) | 23 |
+| Test coverage | 164 offline assertions | 106 offline assertions |
+| Status derivation | derived in code from severity counts | derived in code from severity counts |
+| Findings model | CRITICAL / MAJOR / MINOR + citation, **no SLA tier** | same tiers, plus per-tier SLA (0 h / 72 h / 30 d) |
 | Input validation | throws on missing `image_url` | full schema + SSRF guard, structured HTTP 400 |
-| DB write failure | **aborts the run** | `continueRegularOutput`, reports `persisted: false` |
+| DB write failure | `continueRegularOutput`, reports `persisted: false` | same |
 | Model resilience | single model, no timeout, no retry | timeout + retries + second-model fallback |
-| `violations` storage | stringified JSON in a `text` column | `jsonb` + GIN index |
+| `violations` storage | stringified JSON in `text`, **plus** structured `jsonb` `deficiencies` | `jsonb` + GIN index |
 | Primary key | `id` (integer serial) | `audit_id` (minted text) |
 | `audit_timestamp` type | **`text`** | `timestamptz` |
 
-Section 3 of the US document enumerates all thirteen differences and why each one
-mattered. **India has none of those improvements.** It works, it is in production,
-and it is materially less robust than the US path.
+Section 3 of the US document enumerates the thirteen original differences. India
+has since closed the ones that governed correctness — derived status, severity
+tiers, database-failure tolerance, notifier escaping — and the offline suite that
+proves it. What remains open is real but narrower: SSRF, structured 400s, model
+resilience, and the `text` timestamp column. See §7.
+
+The deliberate non-parity is the **SLA tier**. The US model runs on remediation
+clocks; a Maharashtra owner works to Form B's half-yearly calendar, so copying
+0 h / 72 h / 30 d would answer a question nobody in that regime is asking. See
+§7.9.
 
 ---
 
@@ -44,15 +54,33 @@ and it is materially less robust than the US path.
 
 ```
 Webhook
-  └─ PARSE_Input            image_url + site_id + asset_tag + inspector_id
-      └─ BUILD_Vision_Payload    hardcoded NBC 2016 / CFO Mumbai prompt
+  └─ PARSE_Input            ind_01_parse_input.js
+      │                     image_url + site_id + asset_tag + inspector_id
+      └─ BUILD_Vision_Payload    ind_02_build_payload.js
+          │                      13-item severity-tagged checklist
+          │                      does NOT ask the model for a status
           └─ Claude_Vision_API   anthropic/claude-sonnet-4-5, no timeout, no retry
-              └─ PARSE_Response  model's status trusted as-is
-                  └─ LOG_Audit   -> field_audit_logs   (failure ABORTS the run)
-                      └─ IF_NonCompliant
-                           ├─ true  → NOTIFY_OpsManager → SEND_Slack + SEND_Telegram
-                           └─ false → Respond_to_Webhook1
+              └─ PARSE_Response  ind_03_derive_verdict.js
+                  │              DERIVES the verdict from severities
+                  └─ LOG_Audit   -> field_audit_logs
+                      │          onError: continueRegularOutput, 3 tries
+                      └─ SHAPE_Response   ind_04_shape_response.js
+                          │               sets `persisted`, declares the contract
+                          └─ IF_NonCompliant   branches on `alert_required`
+                               ├─ true  → NOTIFY_OpsManager  ind_05_build_alert.js
+                               │            → SEND_Slack + SEND_Telegram
+                               │          + Respond_to_Webhook1
+                               └─ false → Respond_to_Webhook1
 ```
+
+Every Code node's JavaScript lives in `scripts/nodes/ind_*.js` and is written into
+the JSON by `scripts/patch_india_workflow.py`. `scripts/test_india.mjs` asserts the
+two are identical, so the tests cannot pass against code that is not what runs.
+
+`PARSE_Response` keeps its name although its job changed from transcribing the
+model's verdict to computing one. Renaming it would break every
+`$('PARSE_Response')` reference and discard the node's execution history in n8n,
+for no gain.
 
 `DOWNLOAD_Image → EXTRACT_Base64` is an **orphaned pair**, left from an earlier
 base64 approach that the workflow name still advertises. Both are disabled and
@@ -64,26 +92,82 @@ worth.
 
 ## 3. The checklist
 
-Eight checks, all inside one hardcoded prompt string in `BUILD_Vision_Payload`:
+Thirteen checks, defined as data in `scripts/nodes/ind_02_build_payload.js` and
+rendered into the prompt. Each carries a **severity we assign** and an Indian
+citation. Severity is authored here rather than left to the model so it is
+reviewable and consistent between audits.
 
-1. Pressure gauge needle in the green zone
-2. Safety pin intact and sealed with a tamper tag
-3. **ISI mark** visible on the cylinder body
-4. Hose reel glass unbroken
-5. Expiry date not passed
-6. No physical damage — dents, rust, corrosion
-7. Correctly mounted at the correct height
-8. Inspection tag present and current
+| Code | Severity | What it catches | Reference |
+|---|---|---|---|
+| `UNIT_MISSING_OR_DISCHARGED` | CRITICAL | absent, discharged, or gauge in the recharge zone | IS 2190; NBC 2016 Part 4 |
+| `ACCESS_BLOCKED` | CRITICAL | access fully blocked or unit obscured | IS 2190 cl. 4; NBC 2016 Part 4 |
+| `HOSE_REEL_UNUSABLE` | CRITICAL | hose missing or severed, cabinet won't open | NBC 2016 Part 4 |
+| `GAUGE_OUT_OF_RANGE` | MAJOR | needle outside green, or unreadable gauge face | IS 2190 |
+| `SEAL_OR_PIN_COMPROMISED` | MAJOR | pin missing/unseated, tamper seal broken | IS 2190 |
+| `REFILL_OR_EXPIRY_OVERDUE` | MAJOR | refill or expiry date passed | IS 2190 cl. 7 |
+| `INSPECTION_TAG_MISSING` | MAJOR | tag absent, illegible, unsigned or stale | IS 2190; MFPLSM Rules 2009 |
+| `PHYSICAL_DAMAGE_OR_CORROSION` | MAJOR | corrosion, dents, damaged hose/horn/nozzle | IS 2190 |
+| `MOUNTING_HEIGHT_WRONG` | MAJOR | insecure, or top above ~1.5 m for hand-portable | IS 2190 cl. 4 |
+| `WRONG_CLASS_FOR_HAZARD` | MAJOR | e.g. water-based unit at an energised electrical hazard | IS 2190 cl. 3; NBC 2016 Part 4 |
+| `ISI_MARK_MISSING` | MINOR | ISI / BIS mark absent, painted over or illegible | IS 15683; BIS certification |
+| `CABINET_DEFECT` | MINOR | glass/latch/break-glass defects, equipment still usable | NBC 2016 Part 4 |
+| `SIGNAGE_MISSING` | MINOR | no location marking where the unit is not plainly visible | NBC 2016 Part 4 |
+
+The severity boundary is a judgement, stated so it can be argued with:
+
+- **CRITICAL** — the equipment cannot be relied on to work, or cannot be reached.
+- **MAJOR** — a defect that defeats certification or maintenance requirements.
+- **MINOR** — marking, documentation or housekeeping.
 
 Two consequences worth knowing:
 
 - **ISI is the India-specific marking.** The US prompt explicitly forbids looking
-  for it and teaches the analogue (UL Listing / FM Approval). Feeding an Indian
+  for it and teaches the analogue (UL Listing / FM Approval); the India prompt
+  forbids NFPA, IFC and UL/FM for the same reason in reverse. Feeding an Indian
   extinguisher to the US workflow correctly reports "no UL/FM mark" — technically
   right, and a poor demo.
 - **There is no equipment classification.** The prompt assumes an extinguisher or
   hose reel. The US workflow has nine equipment classes and either classifies or
   takes a hint; India has one implicit class.
+
+### How a verdict is computed
+
+The model is asked for observations and severities, **never for a status**. The
+prompt says outright that a returned verdict will be ignored, and
+`ind_03_derive_verdict.js` ignores it. Precedence, copied from the US workflow:
+
+```
+CRITICAL present            -> NON-COMPLIANT
+else weak evidence          -> REINSPECT      (confidence LOW or image POOR,
+                                               or the model asked for a retake)
+else MAJOR present          -> NON-COMPLIANT
+else MINOR present          -> CONDITIONAL
+else                        -> COMPLIANT
+unparseable model output    -> ERROR
+```
+
+A critical finding outranks the confidence gate deliberately. The cost of a false
+alarm is a wasted van; the cost of a suppressed blocked-access finding is not
+comparable.
+
+`CONDITIONAL` exists because real inspection practice distinguishes "deficiencies
+noted" from "failed". Collapsing the two trains operators to ignore alerts.
+
+**Severity resolution biases upward in both directions.** The checklist severity is
+a floor — the model cannot downgrade a checklist-CRITICAL code — but the model may
+still escalate above it, because reaching for a MINOR code to describe something
+worse is a likelier error than inventing a critical finding. An unrecognised
+severity string normalises to MAJOR, never MINOR. A code outside the checklist is
+flagged in `unknown_codes` and still counted, never dropped.
+
+`risk_score` is `min(100, 100·critical + 25·major + 5·minor)` — the same weights as
+the US workflow, so a risk score means the same thing in both regions.
+
+`alert_required` is a boolean computed as `status !== 'COMPLIANT'`, and
+`IF_NonCompliant` branches on it. Keeping the branch condition in code means
+adding a status can never silently create an unrouted path — which is exactly how
+`REINSPECT` came to be handled in the notifier while being unreachable from the IF
+node.
 
 ---
 
@@ -114,24 +198,81 @@ private-range refusal. See §7.4.
 
 ### Response (HTTP 200)
 
+Declared explicitly by `SHAPE_Response`, not whatever node happened to run last.
+
 ```json
 {
-  "equipment_type": "Dry Powder Type Fire Extinguisher",
   "status": "NON-COMPLIANT",
   "confidence": "HIGH",
+  "equipment_type": "Dry Powder Type Fire Extinguisher",
   "observations": "…",
-  "violations": ["ISI mark not clearly visible on cylinder body", "…"],
-  "site_id": "SITE-BAN-502",
+  "violations": ["[CRITICAL] Pressure gauge needle sits in the recharge zone.", "…"],
+  "site_id": "SITE-MUM-401",
   "asset_tag": "EXT-401-02",
   "inspector_id": "TECH-8891",
   "image_url": "https://…",
-  "audit_timestamp": "2026-09-03T08:52:37.169Z"
+  "audit_timestamp": "2026-09-03T08:52:37.169Z",
+
+  "audit_id": null,
+  "record_id": 4711,
+  "persisted": true,
+  "alert_required": true,
+
+  "critical": true,
+  "risk_score": 100,
+  "severity_counts": { "critical": 1, "major": 0, "minor": 2 },
+  "deficiency_count": 3,
+  "deficiencies": [
+    {
+      "code": "UNIT_MISSING_OR_DISCHARGED",
+      "code_known": true,
+      "severity": "CRITICAL",
+      "finding": "…", "observed": "…", "requirement": "…",
+      "code_reference": "IS 2190",
+      "remediation": "Withdraw and refill the cylinder."
+    }
+  ],
+  "unverifiable_items": ["Refill date not legible"],
+  "unknown_codes": [],
+  "image_quality": "GOOD",
+  "reinspect_required": false,
+  "reinspect_reasons": [],
+
+  "code_basis": { "jurisdiction_resolved": "IN-MH", "…": "…" },
+
+  "advisory_only": true,
+  "certification_eligible": false,
+  "requires_licensed_inspector_signoff": true,
+  "signoff_status": "PENDING",
+  "scope_note": "… Not a Form B certification …",
+  "region": "IND"
 }
 ```
 
-`status` and `confidence` are whatever the model returned. Nothing validates them
-against an enumeration, so a model revision that starts emitting "PARTIAL" or
-"PASS" would flow straight through `IF_NonCompliant` and into the database.
+Notes on the fields that carry weight:
+
+- **`status` is computed, not reported.** Enumerated: `COMPLIANT`, `CONDITIONAL`,
+  `NON-COMPLIANT`, `REINSPECT`, `ERROR`. A model emitting "PASS" or "PARTIAL"
+  changes nothing.
+- **`persisted: false`** means the verdict is real but the database write failed.
+  The alert still fired and says it is the only copy of the finding. The dashboard
+  renders this state.
+- **`record_id`** is the row's integer primary key — India's analogue of the US
+  `audit_id`, and what the Records browser searches on. `null` when the write
+  failed, because there is no record to address.
+- **`violations`** is the flat list, now severity-prefixed. `deficiencies` is the
+  structured version. Both are returned: the flat list is what pre-existing
+  consumers read, the structured one is what the report renders.
+- **`code_basis`** is a static assertion of what the prompt claimed, not a registry
+  lookup — India resolves nothing at run time. Its `fire_code` text is kept
+  identical to `REGIONS.IND.codeBasisFallback` in `lib/regions.ts`, and the offline
+  suite asserts that, so a live audit can never display less statute than a
+  fallback.
+- **`advisory_only` / `certification_eligible` / `signoff_status`** are now stated
+  by the workflow. They were previously supplied by the dashboard on its own
+  authority, which meant the claim depended on which client rendered the record.
+  This is a statement of scope only — there are still no sign-off columns on the
+  table and no write path (§7.8, §7.9).
 
 ### Failure
 
@@ -159,6 +300,17 @@ Created ad hoc; there is no `CREATE TABLE` for it in this repo. Confirmed shape:
  asset_tag       text          -- migration 003
  inspector_id    text          -- migration 003
  image_url       text          -- migration 003
+ deficiencies       jsonb      -- migration 004
+ unverifiable_items jsonb      -- migration 004
+ reinspect_reasons  jsonb      -- migration 004
+ critical           boolean    -- migration 004
+ critical_count     integer    -- migration 004
+ major_count        integer    -- migration 004
+ minor_count        integer    -- migration 004
+ deficiency_count   integer    -- migration 004
+ risk_score         integer    -- migration 004
+ image_quality      text       -- migration 004
+ reinspect_required boolean    -- migration 004
 ```
 
 Two quirks that shape every query against it:
@@ -174,9 +326,13 @@ value happens to be a fixed-width ISO-8601 `Z` string, which makes lexicographic
 order match chronological order. True today, silently wrong the first time anything
 writes a different format.
 
-**`violations` is stringified JSON in a `text` column.** Every reader has to parse
-it, and unparseable text is kept as a single finding rather than dropped — losing a
-violation line is not an acceptable failure mode.
+**`violations` is stringified JSON in a `text` column, and stays that way.** Every
+reader parses it, and unparseable text is kept as a single finding rather than
+dropped — losing a violation line is not an acceptable failure mode. Migration 004
+deliberately did **not** convert it to `jsonb`: that would rewrite the table, break
+rows containing non-JSON text, and buy nothing the new `deficiencies` column does
+not already provide. `deficiencies` is the structured record; `violations` is the
+flat human-readable line, kept for continuity with every row written before it.
 
 ### Migrations
 
@@ -185,35 +341,71 @@ violation line is not an acceptable failure mode.
   a site lookup was a sequential scan plus a sort.
 - `003_field_audit_logs_parity.sql` — adds `asset_tag`, `inspector_id`,
   `image_url` and a partial index on `asset_tag`.
+- `004_field_audit_logs_severity.sql` — adds the eleven severity-model columns
+  above, a partial index on `critical`, and `(status, created_at DESC)` for the
+  Records status filter.
 
-Both are fully guarded: they verify the table and each column first and skip
-cleanly, because that table's shape cannot be proved from source control.
+All are fully guarded: they verify the table and each column first and skip
+cleanly, because that table's shape cannot be proved from source control. All are
+re-runnable.
 
-**Rows written before `003` have NULL in all three columns.** There is no backfill
-and cannot be — the values were never captured. An older India record shows no
-evidence photo and no asset tag.
+**Rows written before a migration have NULL in the columns it added.** There is no
+backfill and cannot be — the values were never captured. An older India record
+shows no evidence photo, no asset tag, and no severity breakdown.
+
+That last one shapes how `SHAPE_Results` reads a pre-004 row: the counts are
+returned as **`null`, not `0`**. "0 critical findings" reads as a clean bill, when
+in fact nothing was ever counted. `critical` is the exception and returns `false`,
+because it gates an "attend now" queue where a null would be worse than a
+conservative answer.
 
 ---
 
 ## 6. Editing this workflow
 
-`AI_Field_Audit_v2.json` is **hand-maintained**, not generated. Non-trivial edits
-go through:
+`AI_Field_Audit_v2.json` is **patched in place**, not regenerated. The US workflow
+is built whole from scratch; this one is not, because it carries live credential
+references and an `active: true` flag that a from-scratch rebuild would be liable
+to drop.
+
+**Never hand-edit the JSON.** Edit `scripts/nodes/ind_*.js`, then:
 
 ```bash
-python3 scripts/patch_india_workflow.py        # idempotent
+node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
+python3 scripts/patch_india_workflow.py               # idempotent
+python3 scripts/patch_india_workflow.py --check       # verify committed JSON
+node scripts/test_india.mjs                           # 164 assertions, no n8n or DB
 ```
 
-The script threads `asset_tag`, `inspector_id` and `image_url` from the request
-through `PARSE_Input` → `PARSE_Response` → `LOG_Audit`, and sets the Gmail
-recipient. It asserts `LOG_Audit` still targets `field_audit_logs` before writing,
-since pointing it at the US table would corrupt a differently-shaped one.
+`test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
+its source file, so tests can never pass against code that is not what runs. It
+also asserts the wiring: the webhook path, the target table, `onError`, the boolean
+IF condition, the column mappings, that the credential reference survived, and that
+the Gmail node is still disabled.
 
-`BUILD_Vision_Payload` is deliberately untouched: `PARSE_Response` reads straight
-from `$('PARSE_Input')`, which n8n resolves by node name wherever it sits in the
-chain, so the payload builder keeps its narrow contract.
+The patch script refuses to write if `LOG_Audit` no longer targets
+`field_audit_logs` (pointing it at the US table would corrupt a differently-shaped
+one) or if the webhook path changed (`lib/regions.ts` depends on it).
 
 ### Re-importing into n8n
+
+⚠️ **Order matters. Migration first, import second.**
+
+```bash
+# 1. schema
+docker exec -i ai-stack-postgres-1 sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/db/004_field_audit_logs_severity.sql
+
+# 2. then re-import AI_Field_Audit_v2.json
+```
+
+Migration first is the safe direction: until the import, the new columns simply
+stay NULL and India behaves exactly as before. Importing first would make every
+insert fail on unknown columns and take India audits down.
+
+The same applies to `AI_Field_Audit_History.json` — its India query names the new
+columns explicitly, so importing it before 004 makes every Records lookup fail with
+`column "deficiencies" does not exist`.
 
 ⚠️ **Update the existing workflow. Do not import a second copy.** Two workflows
 registering `/webhook/audit-field-photov2` will conflict and India audits break.
@@ -223,41 +415,66 @@ after the import.
 
 ---
 
-## 7. Roadmap — next phases
+## 7. Roadmap
 
 India's roadmap is mostly **catching up to the US workflow**, and the ordering
-below reflects risk, not effort.
+reflects risk, not effort. 7.1–7.3 have shipped; 7.4 onward have not.
 
-### 7.1 Trust the code, not the model, for `status`
+### ✅ 7.1 Trust the code, not the model, for `status` — SHIPPED
 
-**Highest priority.** `PARSE_Response` writes whatever the model put in `status`
-straight into the database, and `IF_NonCompliant` branches on it. The verdict that
-triggers escalation is therefore neither reviewable nor stable across model
-versions. A model revision that returns "PASS" instead of "COMPLIANT" would route
-every audit down the compliant branch and no alert would fire.
+`PARSE_Response` used to write whatever the model put in `status` straight into the
+database, and `IF_NonCompliant` branched on it. The verdict that triggers escalation
+was therefore neither reviewable nor stable across model versions: a model revision
+returning "PASS" instead of "COMPLIANT" would have routed every audit — including
+one showing a discharged extinguisher — down the compliant branch, firing no alert,
+silently.
 
-The US workflow derives status in code from severity counts for exactly this
-reason. Porting that needs a severity model (7.2) first.
+The prompt no longer asks for a status and states that one will be ignored;
+`ind_03_derive_verdict.js` computes it from severities. `IF_NonCompliant` branches on
+the derived boolean `alert_required`. See §3, *How a verdict is computed*.
 
-### 7.2 A severity model
+### ✅ 7.2 A severity model — SHIPPED
 
-India returns a flat list of violation strings. "ISI mark not visible" and "gauge
-in the red zone" are not the same finding, and both currently produce an
-undifferentiated `NON-COMPLIANT`. The US workflow's CRITICAL / MAJOR / MINOR tiers
-with per-tier SLA (0 h / 72 h / 30 d) and clause citations are what make a report
-actionable.
+CRITICAL / MAJOR / MINOR, thirteen checklist codes with Indian citations, per-tier
+counts, and a 0–100 risk score using the same weights as the US workflow. Persisted
+by migration 004; rendered by the existing shared report component with no frontend
+change, because the field names match what the US workflow already emitted.
 
-This is the largest single change and would make the two regions comparable for the
-first time.
+The **SLA tier was deliberately not ported**. See §7.9: Maharashtra runs on Form B's
+half-yearly calendar, not remediation clocks.
 
-### 7.3 Do not let a DB failure swallow a finding
+### ✅ 7.3 Do not let a DB failure swallow a finding — SHIPPED
 
-`LOG_Audit` has no `onError`, so a Postgres outage aborts the execution — the alert
-is never sent and the caller gets an empty body. A blocked fire exit would go
-unreported because a database was briefly unavailable.
+`LOG_Audit` now runs with `onError: continueRegularOutput`, `alwaysOutputData` and
+three tries. `SHAPE_Response` inspects the result and sets `persisted`. A Postgres
+outage degrades the audit instead of aborting it: the alert still fires, the caller
+still gets the verdict, and both are told in plain words that this alert is the only
+copy of the finding.
 
-The US workflow uses `continueRegularOutput` and reports `persisted: false`, which
-the UI already renders. One-line fix, disproportionate benefit.
+Previously a blocked fire exit would have gone unreported because a database was
+briefly unavailable — with the finding already computed and sitting in memory.
+
+### Bugs this work surfaced
+
+- **A JSON array from the model was a false pass.** `typeof [] === 'object'` and
+  `[]` is truthy, so a reply of `[]` passed the parse gate, produced no
+  deficiencies, and would have been recorded as COMPLIANT. Caught by the new
+  offline suite, which is the argument for the suite.
+- **The prompt would have collapsed into one unreadable block.** The builder joins
+  an array of lines and filtered out empty strings to drop an optional asset-tag
+  line — which also stripped every intentional blank line. Now it filters `null`.
+- **Telegram alerts were one `&` away from silent loss.** `SEND_Telegram` posts with
+  `parse_mode: HTML` and the content was never escaped, so a finding containing
+  `&`, `<` or `>` made Telegram reject the whole message — losing the alert on
+  exactly the messiest findings. This was item 9 in the US document's comparison
+  table; it is now fixed here too. Slack and the email body are escaped as well.
+- **`NOTIFY_OpsManager` read `$input.item` in all-items mode.** n8n only provides
+  `.item` in "Run Once for Each Item" mode, and the node has no `mode` parameter
+  set. The rewrite uses `$input.first()`, which is valid in either mode, so the
+  question no longer matters — but it is worth confirming that India Slack and
+  Telegram alerts were in fact arriving before this change.
+- **`Respond_to_Webhook1` returned whatever ran last.** The response shape was an
+  accident of node ordering — a Postgres row echo. `SHAPE_Response` now declares it.
 
 ### 7.4 SSRF guard on `image_url`
 
@@ -278,26 +495,36 @@ nothing.
 No timeout, no retries, no fallback model. One provider incident drops the audit.
 The US workflow allows 120 s with 3 retries and falls back to GPT-4o.
 
-### 7.7 Offline tests
+### ✅ 7.7 Offline tests — SHIPPED
 
-There are none. The US workflow has 106 assertions that run without n8n, a
-database or a model call, and they have caught real bugs — including a sandbox
-incompatibility that had passed 85/85 under a friendlier harness. Every change to
-India is currently unverifiable except by running it in production.
+`scripts/test_india.mjs`, 164 assertions, no n8n, no database, no model call. It
+runs under the same restricted sandbox as `test_pipeline.mjs` — globals the n8n
+`vm` context does not reliably provide (`URL`, `Buffer`, `process`, `fetch`, …) are
+shadowed as undefined, because a friendlier harness once let a `new URL(...)`
+`ReferenceError` through at 85/85 in the US pipeline.
 
-### 7.8 Governance parity
+It found two real defects on its first run (see *Bugs this work surfaced*), which
+is roughly the expected yield for a first suite over code that had none.
+
+Still uncovered: the HTTP layer, the Postgres write itself, and the Slack/Telegram
+transports. Those are integration concerns and would need a live stack.
+
+### 7.8 Governance parity — partially shipped
+
+**Shipped:** the workflow now states `advisory_only: true`,
+`certification_eligible: false`, `requires_licensed_inspector_signoff: true`,
+`signoff_status: 'PENDING'` and a `scope_note` naming Form B as what this is *not*.
+It also returns `unverifiable_items`. Previously the dashboard supplied
+`advisory_only` on its own authority, so the disclaimer depended on which client
+rendered the record; now the claim travels with the response.
+
+**Not shipped:** there is still no equivalent of the US table's
+`signoff_status` / `signoff_by` / `signoff_at` columns and no write path. The
+`PENDING` above is a constant, not a state machine.
 
 See **[SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md)** §13.5 — that proposal is
-Florida-shaped, and whether India needs sign-off at all is an open question. CFO
-Mumbai licensing is a different regime, so the credential enumeration would not
-transfer.
-
-
-India returns no `advisory_only`, no `certification_eligible`, no
-`unverifiable_items`, no sign-off columns. The UI supplies `advisory_only: true`
-for IND so the disclaimer still shows, but the workflow itself makes no such
-statement, and there is no equivalent of the US table's
-`signoff_status` / `signoff_by` / `signoff_at`.
+Florida-shaped. CFO Mumbai licensing is a different regime, so the credential
+enumeration would not transfer directly; §7.9 below is the India-specific design.
 
 ### 7.9 Sign-off in Maharashtra is Form B — and it is a stronger hook than the US case
 
@@ -343,24 +570,30 @@ credentials jurisdiction-scoped with a registry, adding Maharashtra is a registr
 edit rather than a schema change. That is the payoff of that decision arriving
 earlier than expected.
 
-⚠️ **Build order matters more than the feature.** Sign-off must not be added to this
-workflow before 7.1–7.3. Signing a verdict that the model itself supplied
-(`status` trusted verbatim) means attaching a legal signature to a value a model
-revision could silently change, on a pipeline where a database outage aborts the run
-entirely. The US workflow derives its verdict in code precisely so a signature means
-something. India must reach that bar first.
+✅ **The build-order precondition is now met.** Sign-off was deliberately blocked
+until 7.1–7.3 shipped: signing a verdict the model itself supplied would have meant
+attaching a signature to a value a model revision could silently change, on a
+pipeline where a database outage aborted the run entirely. India now derives its
+verdict in code from severities that are persisted alongside it, so the stored status
+is reproducible from the stored evidence — you can audit the audit. A signature can
+mean something here.
 
-### 7.10 Correct the hardcoded code basis in the prompt
+What still stands between here and Form B support: sign-off columns on
+`field_audit_logs`, a write path, and the credential model for a **Licensed Agency**
+rather than an individual permit-holder.
 
-`BUILD_Vision_Payload` says *"operating under NBC 2016 and CFO Mumbai norms"*
-verbatim. That is loose: NBC 2016 is recommendatory, and what makes it enforceable in
-Maharashtra is the MFPLSM Act 2006 and Rules 2009, with the CFO of the Municipal
-Corporation as the authority.
+### ✅ 7.10 Correct the hardcoded code basis in the prompt — SHIPPED
 
-The dashboard labels were corrected in `lib/regions.ts`; the prompt was not, because
-changing it requires a re-import. Worth doing together with any other prompt work —
-and worth adding **IS 2190** and **IS 15683** citations to the checklist at the same
-time, which is the India equivalent of the US prompt citing NFPA 10 clauses.
+The prompt said *"operating under NBC 2016 and CFO Mumbai norms"* verbatim, which was
+loose: NBC 2016 is recommendatory, and what makes it enforceable in Maharashtra is the
+MFPLSM Act 2006 and Rules 2009, with the CFO of the Municipal Corporation as the
+authority.
+
+The prompt now states the statute the way `lib/regions.ts` does, names the CFO (MCGM
+for Brihanmumbai) as the AHJ, cites **IS 2190** and **IS 15683** per checklist item,
+and explicitly forbids NFPA, IFC and UL/FM citations — the mirror of the US prompt
+forbidding ISI. Done as part of the §7.2 prompt rewrite, since both needed the same
+re-import.
 
 ### 7.11 Shared with the US workflow
 
@@ -390,20 +623,30 @@ These are not India-specific — see the US document for detail:
 | Slack + Telegram alerts | ✅ live |
 | Printable record | ✅ live — shared renderer with US |
 | Email alerts | ⚠️ node ships **disabled** |
-| Derived status | ❌ model's `status` trusted verbatim (7.1) |
-| Severity tiers | ❌ flat violation strings (7.2) |
-| DB failure tolerance | ❌ aborts the run (7.3) |
+| Derived status | ✅ computed in code from severities (7.1) |
+| Severity tiers | ✅ CRITICAL / MAJOR / MINOR + risk score (7.2) |
+| DB failure tolerance | ✅ `continueRegularOutput`, reports `persisted: false` (7.3) |
+| Offline tests | ✅ 164 assertions, restricted sandbox (7.7) |
+| Notifier escaping | ✅ Telegram / Slack / email all escaped |
+| Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
+| Statute stated correctly in the **prompt** | ✅ with IS 2190 / IS 15683 citations (7.10) |
+| Scope declared by the workflow | ✅ `advisory_only`, `certification_eligible: false` (7.8) |
+| SLA tiers | ➖ deliberately absent — Form B calendar, not SLA (7.9) |
 | SSRF guard | ❌ none (7.4) |
 | Structured HTTP 400 | ❌ throws instead (7.5) |
 | Timeout / retry / fallback model | ❌ none (7.6) |
-| Offline tests | ❌ none (7.7) |
-| Sign-off | ❌ no columns, no write path (7.8, 7.9) |
+| Sign-off columns and write path | ❌ none (7.8, 7.9) |
 | Form B support (half-yearly evidence pack) | ❌ researched, not built (7.9) |
-| Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
-| Statute stated correctly in the **prompt** | ❌ still says "NBC 2016 and CFO Mumbai norms" (7.10) |
 | Webhook authentication | ❌ open (7.11) |
+| `audit_timestamp` column type | ❌ still `text` (§5) |
 
-**Honest summary:** India works and is in production, but it is the older, thinner
-implementation. If India becomes commercially significant, 7.1 to 7.3 are the ones
-that matter — they are the difference between a system that reports a blocked fire
-exit and one that can silently fail to.
+**Honest summary:** India has caught up on the things that decide whether a finding
+reaches a human. The verdict is derived in code from severities that are stored
+alongside it, a database outage degrades the audit instead of discarding it, the
+notifier no longer loses messages to an unescaped ampersand, and 164 assertions run
+without touching production.
+
+What remains open is a different class of problem: input hardening (7.4, 7.5),
+availability (7.6), and the unauthenticated webhook (7.11) — which is the only item
+on this page that is currently costing money, since anyone with the URL can spend
+model credits. That, not sign-off, is the next thing worth doing.

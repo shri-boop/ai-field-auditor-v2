@@ -143,6 +143,22 @@ function shapeInd(r) {
     // There is no minted audit_id, but there IS an integer primary key, so an
     // India record can still be addressed exactly. record_id is its analogue.
     audit_id: null,
+    // ---- migration 004: the severity model ----
+    // Emitted as null rather than 0 when absent. A record written before 004 has
+    // no tier breakdown, and reporting "0 critical findings" for one would be a
+    // fabrication — the severities were never computed. Null renders as absent;
+    // zero renders as a clean bill.
+    critical: r.critical === true,
+    risk_score: r.risk_score === undefined ? null : r.risk_score,
+    severity_counts: {
+      critical: r.critical_count === undefined ? null : r.critical_count,
+      major: r.major_count === undefined ? null : r.major_count,
+      minor: r.minor_count === undefined ? null : r.minor_count
+    },
+    deficiency_count: r.deficiency_count === undefined ? null : r.deficiency_count,
+    image_quality: r.image_quality === undefined ? null : r.image_quality,
+    reinspect_required: r.reinspect_required === true,
+    reinspect_reasons: toArray(r.reinspect_reasons),
     record_id: r.id === undefined ? null : r.id,
     site_id: r.site_id,
 
@@ -164,8 +180,15 @@ function shapeInd(r) {
     audit_timestamp: iso(r.audit_timestamp) || iso(r.created_at),
     created_at: iso(r.created_at),
 
-    deficiencies: [],
-    unverifiable_items: [],
+    // Structured findings, also from migration 004. Empty for pre-004 rows, whose
+    // only record of what was wrong is the flat `violations` list above — the
+    // report renderer already falls back to that when deficiencies is empty.
+    deficiencies: toArray(r.deficiencies),
+    unverifiable_items: toArray(r.unverifiable_items),
+
+    // India resolves no code basis at run time — it is hardcoded in the prompt —
+    // so nothing is snapshotted per row and there is nothing honest to put here.
+    // The dashboard's regions.ts fallback supplies the statute text instead.
     code_basis: {},
     advisory_only: true,
 

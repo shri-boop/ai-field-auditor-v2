@@ -313,6 +313,66 @@ const indBadJson = shape('IND', applied, [{
 check('unparseable violations text is kept as one finding, never dropped',
   indBadJson.violations.length === 1 && indBadJson.violations[0] === 'not json at all');
 
+// ------------------------------------------- IND severity model (migration 004)
+console.log('\nIND severity model (migration 004)');
+
+check('IND query selects the severity columns',
+  /\bdeficiencies\b/.test(indSql) && /\bcritical_count\b/.test(indSql) &&
+  /\brisk_score\b/.test(indSql) && /\bimage_quality\b/.test(indSql) &&
+  /\breinspect_required\b/.test(indSql));
+
+const indSeverity = shape('IND', applied, [{
+  id: 12, site_id: 'SITE-MUM-401', status: 'NON-COMPLIANT', confidence: 'HIGH',
+  violations: '["[CRITICAL] Cylinder discharged"]',
+  deficiencies: [{ code: 'UNIT_MISSING_OR_DISCHARGED', severity: 'CRITICAL', finding: 'discharged' }],
+  unverifiable_items: ['Refill date'], reinspect_reasons: [],
+  critical: true, critical_count: 1, major_count: 0, minor_count: 2,
+  deficiency_count: 3, risk_score: 100, image_quality: 'GOOD',
+  reinspect_required: false,
+  audit_timestamp: '2026-09-04T09:00:00Z', created_at: '2026-09-04T09:00:01Z'
+}]).rows[0];
+
+check('a retrieved IND record carries structured deficiencies',
+  indSeverity.deficiencies.length === 1 &&
+  indSeverity.deficiencies[0].severity === 'CRITICAL');
+check('a retrieved IND record rebuilds severity_counts',
+  indSeverity.severity_counts.critical === 1 && indSeverity.severity_counts.minor === 2);
+check('a retrieved IND record carries the risk score and critical flag',
+  indSeverity.risk_score === 100 && indSeverity.critical === true);
+check('a retrieved IND record carries image_quality', indSeverity.image_quality === 'GOOD');
+check('a retrieved IND record carries unverifiable_items',
+  indSeverity.unverifiable_items.length === 1);
+
+// jsonb normally arrives parsed, but tolerate a text column holding JSON.
+check('IND deficiencies survive arriving as a JSON string',
+  shape('IND', applied, [{
+    id: 13, site_id: 'S', violations: '[]', audit_timestamp: '2026-09-04T09:00:00Z',
+    deficiencies: '[{"severity":"MAJOR","finding":"gauge low"}]'
+  }]).rows[0].deficiencies[0].finding === 'gauge low');
+
+// A pre-004 row has no severities. Reporting them as 0 would be a fabrication:
+// "0 critical findings" reads as a clean bill, when in fact nothing was counted.
+const indPre004 = shape('IND', applied, [{
+  id: 3, site_id: 'S', status: 'NON-COMPLIANT',
+  violations: '["ISI mark not visible"]',
+  audit_timestamp: '2026-05-01T08:00:00Z', created_at: '2026-05-01T08:00:01Z'
+}]).rows[0];
+
+check('a pre-004 IND row reports null severity counts, never zero',
+  indPre004.severity_counts.critical === null &&
+  indPre004.severity_counts.major === null &&
+  indPre004.severity_counts.minor === null);
+check('a pre-004 IND row reports null risk_score, never zero',
+  indPre004.risk_score === null);
+check('a pre-004 IND row reports null image_quality', indPre004.image_quality === null);
+check('a pre-004 IND row still carries its flat violations',
+  indPre004.violations.length === 1);
+check('a pre-004 IND row has empty structured findings, not undefined',
+  Array.isArray(indPre004.deficiencies) && indPre004.deficiencies.length === 0 &&
+  Array.isArray(indPre004.unverifiable_items) && indPre004.unverifiable_items.length === 0);
+check('critical is false, not null, on a pre-004 row (it gates an "attend now" queue)',
+  indPre004.critical === false);
+
 const fullPage = shape('US', { limit: 2 }, [
   { audit_id: 'a', audit_timestamp: '2026-09-03T10:00:00Z' },
   { audit_id: 'b', audit_timestamp: '2026-09-02T10:00:00Z' }

@@ -91,9 +91,19 @@ LIMIT $7::int OFFSET $8::int"""
 # asset_tag, inspector_id and image_url were added by migration 003. Rows written
 # before it have NULL in all three, so the UI must treat them as optional — an
 # India record from before the migration has no evidence photo.
+#
+# ⚠️ MIGRATION ORDER. The severity columns below (deficiencies … reinspect_required)
+# come from migration 004. Because columns are listed explicitly, importing this
+# workflow before 004 is applied makes every Records lookup fail with
+# `column "deficiencies" does not exist`. Apply 004 first. Rows written before it
+# have NULL in all of them, which is why SHAPE_Results emits them as empty rather
+# than required.
 IND_QUERY = """SELECT
   id, site_id, asset_tag, inspector_id, equipment_type, status, confidence,
-  observations, violations, image_url, audit_timestamp, created_at
+  observations, violations, image_url, audit_timestamp, created_at,
+  deficiencies, unverifiable_items, reinspect_reasons,
+  critical, critical_count, major_count, minor_count, deficiency_count,
+  risk_score, image_quality, reinspect_required
 FROM field_audit_logs
 WHERE ($1::text        IS NULL OR site_id   = $1)
   AND ($2::int         IS NULL OR id        = $2)

@@ -71,21 +71,27 @@ Webhook
 
 ## 3. What changed from v2, and why
 
+This table records v2 (India) **as it was when the US workflow was designed**.
+India has since closed rows 2, 3, 5, 6, 9, 12 and 13 by porting the same
+approaches — see [IND_FIRE_AUDIT_WORKFLOW.md](IND_FIRE_AUDIT_WORKFLOW.md) §7. The
+"India" column below is therefore historical for those rows, and the ✅ marks which
+ones it caught up on.
+
 | # | v2 (India) behaviour | US workflow | Why it matters |
 |---|---|---|---|
 | 1 | Code basis hardcoded in the prompt string | Runtime registry keyed by jurisdiction | Correctness. IFC citations are wrong in Florida. |
-| 2 | **Model's own `status` is trusted verbatim** | Status **derived** in code from severity counts | The verdict that triggers escalation must be reviewable and stable across model versions. |
-| 3 | No severity model — flat list of violation strings | CRITICAL / MAJOR / MINOR with per-tier SLA (0 h / 72 h / 30 d) | US inspection and insurance practice is tiered; "non-compliant" alone is not actionable. |
+| 2 ✅ | **Model's own `status` is trusted verbatim** | Status **derived** in code from severity counts | The verdict that triggers escalation must be reviewable and stable across model versions. |
+| 3 ✅ | No severity model — flat list of violation strings | CRITICAL / MAJOR / MINOR with per-tier SLA (0 h / 72 h / 30 d) | US inspection and insurance practice is tiered; "non-compliant" alone is not actionable. India ported the tiers but **not** the SLA — Maharashtra runs on Form B's half-yearly calendar. |
 | 4 | Any `image_url` accepted and handed to a third party | https-only, host allow-list, private-range refusal | SSRF. The URL is caller-controlled and dereferenced by OpenRouter. |
-| 5 | `REINSPECT` handled in the notifier but **never produced** by the prompt — dead code | Prompt emits it; confidence/quality gate routes it | Removes an unreachable branch and makes low-quality photos a first-class outcome. |
-| 6 | DB write failure aborts the run | `continueRegularOutput` → `persisted: false` on the alert | A Postgres outage must not swallow a blocked fire exit. |
+| 5 ✅ | `REINSPECT` handled in the notifier but **never produced** by the prompt — dead code | Prompt emits it; confidence/quality gate routes it | Removes an unreachable branch and makes low-quality photos a first-class outcome. |
+| 6 ✅ | DB write failure aborts the run | `continueRegularOutput` → `persisted: false` on the alert | A Postgres outage must not swallow a blocked fire exit. |
 | 7 | Single model, no timeout, no retry | Timeout + retries + second-model fallback | One provider incident shouldn't drop an audit. |
-| 8 | `violations` stored as a stringified JSON text column | `jsonb` + GIN index + exploded view | Enables "which checklist item fails most often across the portfolio". |
-| 9 | Telegram sent with `parse_mode: HTML` but content unescaped | All dynamic content entity-escaped | Fire-door findings legitimately contain `<1/8 in` and `>3/4 in`, which break the Telegram API. |
-| 10 | Timestamps hardcoded to `Asia/Kolkata` | Per-jurisdiction timezone with zone abbreviation | The US spans six zones; Arizona ignores DST. |
-| 11 | No audit identity | `audit_id` + `idempotency_key` | Traceability and duplicate detection. |
-| 12 | Implies a compliance verdict | `advisory_only`, `certification_eligible: false`, `signoff_status`, `unverifiable_items` | A photograph cannot certify compliance. Florida statutorily reserves firesafety inspections to inspectors certified under s. 633.216, F.S. |
-| 13 | Full `$json` returned (incl. email HTML) | Curated response contract | Smaller payload, explicit API surface. |
+| 8 | `violations` stored as a stringified JSON text column | `jsonb` + GIN index + exploded view | Enables "which checklist item fails most often across the portfolio". India added a `jsonb` `deficiencies` column alongside; `violations` stays `text` on purpose. |
+| 9 ✅ | Telegram sent with `parse_mode: HTML` but content unescaped | All dynamic content entity-escaped | Fire-door findings legitimately contain `<1/8 in` and `>3/4 in`, which break the Telegram API. |
+| 10 | Timestamps hardcoded to `Asia/Kolkata` | Per-jurisdiction timezone with zone abbreviation | The US spans six zones; Arizona ignores DST. India is single-zone, so this one is not a defect there. |
+| 11 | No audit identity | `audit_id` + `idempotency_key` | Traceability and duplicate detection. India exposes its serial primary key as `record_id` instead. |
+| 12 ✅ | Implies a compliance verdict | `advisory_only`, `certification_eligible: false`, `signoff_status`, `unverifiable_items` | A photograph cannot certify compliance. Florida statutorily reserves firesafety inspections to inspectors certified under s. 633.216, F.S. |
+| 13 ✅ | Full `$json` returned (incl. email HTML) | Curated response contract | Smaller payload, explicit API surface. |
 
 ### Bugs this work surfaced
 
