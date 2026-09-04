@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { AlertCircle, AlertTriangle, Info, ShieldAlert, Upload } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Info, Printer, ShieldAlert, Upload } from 'lucide-react';
 import { BRAND } from '@/lib/brand';
 import {
   REGIONS,
@@ -327,7 +327,7 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
               it is not an input — it selects which engine and which code basis
               the whole screen is operating under, so it belongs with identity.
               Moving it up also lets the form start immediately. */}
-          <header className="mb-8 flex flex-wrap items-center justify-between gap-x-8 gap-y-6 border-b border-[var(--kr-hairline)] pb-6">
+          <header className="kr-screen-only mb-8 flex flex-wrap items-center justify-between gap-x-8 gap-y-6 border-b border-[var(--kr-hairline)] pb-6">
             <div className="flex items-center gap-4">
               <Image
                 src={BRAND.markSrc}
@@ -391,9 +391,9 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
             </div>
           </header>
 
-          <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+          <div className="kr-report-grid grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
             {/* ===================== INPUTS ===================== */}
-            <div className="space-y-6">
+            <div className="kr-screen-only space-y-6">
               <section className="space-y-3">
                 <label htmlFor="site-id" className="kr-eyebrow block">
                   Site ID / Location Code
@@ -596,7 +596,9 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                   </svg>
                   <div className="text-center">
                     <p className="kr-eyebrow">Awaiting evidence</p>
-                    <p className="mt-3 text-xs text-kr-muted">{regionDef.codeLabel}</p>
+                    <p className="mt-3 text-xs text-kr-muted">
+                      Upload a photograph to begin
+                    </p>
                   </div>
                 </div>
               )}
@@ -635,6 +637,63 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
 
               {state === 'success' && result && (
                 <div className="space-y-4">
+                  {/* -------- printed document header --------
+                      Paper needs identification the screen does not: the app
+                      masthead is hidden when printing, so the record carries its
+                      own letterhead plus the fields an AHJ or insurer looks for
+                      first. */}
+                  <div className="kr-print-only kr-avoid-break mb-5 border-b border-[var(--kr-hairline)] pb-4">
+                    <div className="flex items-start justify-between gap-6">
+                      <div className="flex items-center gap-3">
+                        <Image src={BRAND.markSrc} alt="" width={54} height={54} />
+                        <div>
+                          <div className="kr-wordmark text-[15px] leading-none">
+                            {BRAND.companyFirst} <em>{BRAND.companySecond}</em>
+                          </div>
+                          <div className="kr-tagline mt-1.5">{BRAND.tagline}</div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="kr-script text-[28px]">{BRAND.productWordmark}</div>
+                        <div className="kr-label mt-0.5">{BRAND.productDescriptor}</div>
+                      </div>
+                    </div>
+
+                    <h2 className="kr-serif mt-4 text-lg tracking-[0.08em] text-kr-light">
+                      Field Audit Record
+                    </h2>
+
+                    <dl className="mt-3 grid grid-cols-2 gap-x-8 gap-y-1.5 text-[11px]">
+                      <PrintRow label="Audit ID" value={result.audit_id} />
+                      <PrintRow label="Site" value={result.site_id ?? siteId} />
+                      <PrintRow
+                        label="Jurisdiction"
+                        value={
+                          result.code_basis?.jurisdiction_label ??
+                          result.code_basis?.jurisdiction_resolved ??
+                          regionDef.label
+                        }
+                      />
+                      <PrintRow label="Recorded" value={timestamp} />
+                      <PrintRow label="Equipment" value={result.equipment_type} />
+                      <PrintRow label="Status" value={result.status} />
+                    </dl>
+                  </div>
+
+                  {/* -------- evidence plate (print) --------
+                      The photograph lives in the input column, which is hidden on
+                      paper — but a record without its evidence is not a record. */}
+                  {preview && (
+                    <div className="kr-print-only kr-evidence kr-avoid-break mb-5">
+                      <p className="kr-label mb-2">Evidence</p>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={preview} alt="Audit subject" />
+                      {file?.name && (
+                        <p className="kr-data mt-1.5 text-[10px] text-kr-muted">{file.name}</p>
+                      )}
+                    </div>
+                  )}
+
                   {/* -------- verdict -------- */}
                   <section
                     className="kr-verdict p-6"
@@ -792,7 +851,7 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                           return (
                             <li
                               key={d.code ?? i}
-                              className="space-y-2 border-l-2 pl-4"
+                              className="kr-deficiency space-y-2 border-l-2 pl-4"
                               style={{
                                 borderLeftColor: SEVERITY_COLOR[severity] ?? SEVERITY_COLOR.MAJOR,
                               }}
@@ -933,22 +992,56 @@ export function AuditConsole({ enabledRegions }: { enabledRegions: RegionKey[] }
                     </div>
                   )}
 
-                  <Button
-                    onClick={() => {
-                      resetOutput();
-                      setFile(null);
-                      setPreview(null);
-                    }}
-                    className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
-                  >
-                    New audit
-                  </Button>
+                  {/* -------- sign-off block (print) --------
+                      The workflow returns signoff_status: PENDING and the schema
+                      has signoff_by / signoff_at, but nothing writes them yet. On
+                      paper that gap is closed the way the trade already closes it
+                      — a wet signature. Printing this makes the record's
+                      provisional status impossible to overlook. */}
+                  <div className="kr-print-only kr-avoid-break mt-6 border-t border-[var(--kr-hairline)] pt-5">
+                    <p className="kr-eyebrow">Review &amp; sign-off</p>
+                    <p className="mt-2 max-w-3xl text-[10.5px] leading-relaxed text-kr-muted">
+                      This record is an automated advisory screening of a
+                      photograph. It is not a certification of compliance and does
+                      not constitute a firesafety inspection. Findings require
+                      confirmation by an inspector qualified in the jurisdiction
+                      above before any remediation is signed off or relied upon.
+                    </p>
+                    <div className="mt-6 grid grid-cols-3 gap-6 text-[10px]">
+                      {['Reviewed by', 'Licence / certification no.', 'Date'].map((label) => (
+                        <div key={label}>
+                          <div className="h-8 border-b border-[var(--kr-hairline)]" />
+                          <p className="kr-label mt-1.5">{label}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="kr-screen-only grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Button
+                      onClick={() => window.print()}
+                      className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
+                    >
+                      <Printer className="mr-2 h-3.5 w-3.5" />
+                      Print / Save as PDF
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        resetOutput();
+                        setFile(null);
+                        setPreview(null);
+                      }}
+                      className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
+                    >
+                      New audit
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>
           </div>
 
-          <footer className="mt-16 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--kr-hairline)] pt-6">
+          <footer className="kr-screen-only mt-16 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--kr-hairline)] pt-6">
             <p className="kr-label">
               {BRAND.companyFull} · {BRAND.productName}
             </p>
@@ -972,11 +1065,22 @@ function SeverityChip({ severity, count }: { severity: string; count?: number })
   };
   return (
     <span
-      className="rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
+      className="kr-severity-chip rounded-sm border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
       style={style}
     >
       {count !== undefined ? `${count} ${key}` : key}
     </span>
+  );
+}
+
+/** Label/value pair for the printed document header. */
+function PrintRow({ label, value }: { label: string; value?: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex gap-2">
+      <dt className="kr-label shrink-0">{label}</dt>
+      <dd className="kr-data text-kr-light">{value}</dd>
+    </div>
   );
 }
 
