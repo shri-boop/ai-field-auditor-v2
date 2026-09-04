@@ -19,7 +19,9 @@ export type RegionField =
   | 'jurisdiction'
   | 'occupancy_type'
   | 'equipment_hint'
-  | 'osha_workplace';
+  | 'osha_workplace'
+  | 'asset_tag'
+  | 'inspector_id';
 
 export interface RegionDef {
   key: RegionKey;
@@ -65,7 +67,21 @@ export const REGIONS: Record<RegionKey, RegionDef> = {
       'No deficiencies visible in this photograph. This is not a certification.',
     siteIdPlaceholder: 'SITE-CA-LAX-014',
     timestampLocale: 'en-US',
-    fields: ['jurisdiction', 'occupancy_type', 'equipment_hint', 'osha_workplace'],
+    /**
+     * asset_tag and inspector_id are US-only because only field_audit_us_logs has
+     * the columns. A site is audited repeatedly and holds many devices, so
+     * asset_tag is what distinguishes "the extinguisher by the kitchen door" from
+     * "the one in the corridor" — without it two audits of one site are
+     * genuinely ambiguous. India's table cannot record either.
+     */
+    fields: [
+      'jurisdiction',
+      'occupancy_type',
+      'equipment_hint',
+      'osha_workplace',
+      'asset_tag',
+      'inspector_id',
+    ],
   },
 };
 

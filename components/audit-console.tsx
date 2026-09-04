@@ -60,6 +60,8 @@ export function AuditConsole({
   const [occupancy, setOccupancy] = useState<string>(US_DEFAULTS.occupancy_type);
   const [equipmentHint, setEquipmentHint] = useState<string>(US_DEFAULTS.equipment_hint);
   const [oshaWorkplace, setOshaWorkplace] = useState<boolean>(US_DEFAULTS.osha_workplace);
+  const [assetTag, setAssetTag] = useState('');
+  const [inspectorId, setInspectorId] = useState('');
 
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -127,6 +129,8 @@ export function AuditConsole({
         payload.occupancy_type = occupancy;
         payload.equipment_hint = equipmentHint;
         payload.osha_workplace = oshaWorkplace;
+        if (assetTag.trim()) payload.asset_tag = assetTag.trim();
+        if (inspectorId.trim()) payload.inspector_id = inspectorId.trim();
       }
 
       const auditRes = await fetch('/api/audit', {
@@ -342,6 +346,37 @@ export function AuditConsole({
                           {hintFor(US_EQUIPMENT, equipmentHint)}
                         </p>
                       )}
+                    </div>
+
+                    {/* Asset tag and inspector. A site holds many devices and is
+                        audited repeatedly, so site_id alone cannot identify what
+                        was inspected — two extinguishers at one address produce
+                        two records that read identically without these. */}
+                    <div className="grid grid-cols-1 gap-4 border-t border-[var(--kr-hairline-2)] pt-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <label htmlFor="asset-tag" className="kr-label block">
+                          Asset tag
+                        </label>
+                        <Input
+                          id="asset-tag"
+                          placeholder="EXT-014-03"
+                          value={assetTag}
+                          onChange={(e) => setAssetTag(e.target.value)}
+                          className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label htmlFor="inspector-id" className="kr-label block">
+                          Inspector
+                        </label>
+                        <Input
+                          id="inspector-id"
+                          placeholder="TECH-4471"
+                          value={inspectorId}
+                          onChange={(e) => setInspectorId(e.target.value)}
+                          className="kr-field kr-data h-11 rounded-md px-3 text-sm placeholder:text-kr-muted/50"
+                        />
+                      </div>
                     </div>
 
                     <div className="flex items-center justify-between gap-4 border-t border-[var(--kr-hairline-2)] pt-4">
