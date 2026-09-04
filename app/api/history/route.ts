@@ -39,7 +39,18 @@ function n8nBaseUrl(): string {
 }
 
 export async function POST(request: Request) {
-  const apiKey = process.env.HISTORY_API_KEY;
+  /**
+   * Trimmed for the same reason middleware.ts trims its credentials, and with a
+   * sharper failure mode here: this value goes straight into an HTTP header, and
+   * `fetch` throws TypeError on a header value containing a newline. That would
+   * surface through the catch below as UPSTREAM_UNREACHABLE — "could not reach
+   * the records service" — pointing at the network when the real cause is an
+   * invisible character in an environment variable.
+   *
+   * The realistic path to that: generate the key with openssl on the server,
+   * copy it, paste it into Vercel, and bring the line ending along.
+   */
+  const apiKey = process.env.HISTORY_API_KEY?.trim();
 
   // Fail loudly rather than letting n8n return an opaque 403. Absence of the key
   // is a deployment-configuration state, not a caller error.

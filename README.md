@@ -44,6 +44,28 @@ exposing Postgres to serve a history page would be a worse problem than the one
 it solves. n8n is already public, already holds the credential, and already sits
 on that network.
 
+### In the UI
+
+A **Records** tab appears beside **New audit** once `HISTORY_API_KEY` is set —
+and only then, because without it `/api/history` returns 503 and a tab that
+cannot work is worse than no tab.
+
+Search by site ID, reference, asset tag (US), date range and status; results list
+newest first; clicking a row opens the full report and **Print / Save as PDF**
+works on it exactly as on a live audit.
+
+That last part is why `components/audit-report.tsx` exists. The report renderer
+was extracted out of `audit-console.tsx` so a retrieved record and a fresh one go
+through the same component — one renderer, one print stylesheet, one set of
+page-break rules. `SHAPE_Results` normalising both tables into the live response
+contract is the other half of that arrangement.
+
+The reference field means different things per region because the tables do: US
+records are addressed by `audit_id`, India records by `record_id` (its integer
+primary key). Asset tag is US-only. Those controls are driven off the region
+because the backend **rejects** a filter that does not exist for a region rather
+than ignoring it.
+
 ### Setup
 
 1. Import `AI_Field_Audit_History.json` into n8n.
