@@ -459,11 +459,17 @@ things, none of which exist:
 4. **A sign-off UI**, including capture of the reviewer's licence or certification
    number — the field a printed record currently leaves as a ruled line.
 
-**Open architectural decision:** where the user store lives. The n8n Postgres
-(consistent with everything else, but every read becomes a workflow), a separate
-managed Postgres reachable from Vercel (simpler app code, second database to
-operate), or a hosted identity provider (fastest to correct, adds a dependency and
-a per-seat cost). This needs deciding before any of it is built.
+**Design proposal: [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md).** The user store
+question is settled — a separate managed Postgres reachable from Vercel, with the
+signer's identity **snapshotted** into each signoff row so no cross-database
+foreign key is needed. That snapshot is not a workaround: a signature that depends
+on joining a live user table is a signature that changes when the user record
+changes.
+
+The proposal's load-bearing decision is that there are **two kinds of sign-off** —
+a desk review of the photograph, which is not an inspection, and a field
+verification, which is. One button for both would make every office triage print as
+though someone had stood in front of the equipment.
 
 ### 11.2 Email alerts — recipient fixed, node still disabled
 

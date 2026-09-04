@@ -108,7 +108,28 @@ export function AuditReport({
             than the whole page so it stays a letterhead and not a toner sink. */}
         <div className="kr-print-letterhead flex items-start justify-between gap-6">
           <div className="flex items-center gap-3">
-            <Image src={BRAND.markSrc} alt="" width={58} height={58} />
+            {/* Two non-obvious requirements, both learned by the mark simply not
+                appearing in the PDF:
+
+                loading="eager" — next/image lazy-loads by default, and this block
+                lives inside .kr-print-only { display: none }. An element that is
+                never in the viewport never satisfies a lazy load, so the request
+                was never made and there was nothing for the print renderer to
+                draw. display:none does not itself prevent a fetch; lazy loading
+                does.
+
+                width/height 76 to match the masthead, then scaled by CSS — asking
+                for 58 generated a SECOND optimised URL, so it could not reuse the
+                resource the masthead had already fetched. Same intrinsic size,
+                one request, guaranteed warm by print time. */}
+            <Image
+              src={BRAND.markSrc}
+              alt=""
+              width={76}
+              height={76}
+              loading="eager"
+              className="h-[58px] w-[58px] shrink-0"
+            />
             <div>
               <div className="kr-wordmark text-[15px] leading-none">
                 {BRAND.companyFirst} <em>{BRAND.companySecond}</em>

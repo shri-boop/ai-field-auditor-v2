@@ -39,6 +39,7 @@ and roadmap:
 
 - **[docs/US_FIRE_AUDIT_WORKFLOW.md](docs/US_FIRE_AUDIT_WORKFLOW.md)** — IFC / NFPA
 - **[docs/IND_FIRE_AUDIT_WORKFLOW.md](docs/IND_FIRE_AUDIT_WORKFLOW.md)** — NBC 2016 / CFO Mumbai
+- **[docs/SIGNOFF_DESIGN.md](docs/SIGNOFF_DESIGN.md)** — sign-off design proposal (not built)
 
 The two are **not** mirror images. India is the original build and lacks the
 hardening the US workflow was designed with — derived status, severity tiers, SSRF
