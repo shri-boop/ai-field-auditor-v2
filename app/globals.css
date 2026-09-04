@@ -568,8 +568,20 @@
 
     background: #0e0c08 !important;
     color: #d8d1c4;
-    border-radius: 3px;
-    padding: 7mm 8mm;
+
+    /* 3mm rather than 3px. At 3px the corners read as a printing artefact on a
+       band this wide — barely rounded, so it just looks like a rectangle that
+       failed. 3mm (~11px) is unmistakably deliberate while staying architectural
+       rather than a pill. */
+    border-radius: 3mm;
+
+    /* Was 7mm vertical, which left the band roughly twice the height of its own
+       contents: 58px of lockup inside 53px of padding. Tightening to 4mm brings
+       the band close to the lockup so it reads as a letterhead rather than a
+       banner with something small in the middle. Horizontal stays generous —
+       side margin is what makes the wordmark feel placed rather than crammed. */
+    padding: 4mm 7mm;
+
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }

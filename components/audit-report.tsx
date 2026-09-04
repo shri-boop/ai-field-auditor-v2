@@ -106,7 +106,11 @@ export function AuditReport({
             contrast and the fine geometry disappeared. This restores the dark
             band the brand's email template uses, scoped to the lockup rather
             than the whole page so it stays a letterhead and not a toner sink. */}
-        <div className="kr-print-letterhead flex items-start justify-between gap-6">
+        {/* items-center, not items-start: the left lockup centres its text block
+            against the 58px mark, so top-aligning the right column left "Aquila"
+            sitting visibly higher than "KRATU AI LABS". Centring both puts them on
+            one optical line. */}
+        <div className="kr-print-letterhead flex items-center justify-between gap-6">
           <div className="flex items-center gap-3">
             {/* Two non-obvious requirements, both learned by the mark simply not
                 appearing in the PDF:
