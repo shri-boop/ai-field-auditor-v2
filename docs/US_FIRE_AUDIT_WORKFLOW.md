@@ -471,6 +471,12 @@ a desk review of the photograph, which is not an inspection, and a field
 verification, which is. One button for both would make every office triage print as
 though someone had stood in front of the equipment.
 
+Credentials are **jurisdiction-scoped from day one**, reusing this workflow's own
+jurisdiction keys. That is what lets the product ask whether a signer is credentialed
+in the jurisdiction the audit was actually judged against — the differentiator a
+multi-state contractor will pay for, and something that cannot be reconstructed later
+for records already signed. See SIGNOFF_DESIGN §3–§4.
+
 ### 11.2 Email alerts — recipient fixed, node still disabled
 
 `SEND_Email` was hardcoded to a personal Gmail address. **The node ships

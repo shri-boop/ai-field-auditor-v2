@@ -287,7 +287,7 @@ India is currently unverifiable except by running it in production.
 
 ### 7.8 Governance parity
 
-See **[SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md)** §12.5 — that proposal is
+See **[SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md)** §13.5 — that proposal is
 Florida-shaped, and whether India needs sign-off at all is an open question. CFO
 Mumbai licensing is a different regime, so the credential enumeration would not
 transfer.
