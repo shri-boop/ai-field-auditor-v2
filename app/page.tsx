@@ -39,7 +39,12 @@ export default function Page() {
   // Records depend on the n8n history workflow and its shared secret. Without
   // the key /api/history returns 503, so the tab is hidden rather than offered
   // and broken. Presence of the key is the whole feature flag.
-  const recordsEnabled = Boolean(process.env.HISTORY_API_KEY);
+  //
+  // Trimmed to match how the route reads it. Without that, a value of only
+  // whitespace would be truthy here and blank there — the tab would render and
+  // then every search would fail with RECORDS_NOT_CONFIGURED, which is the worst
+  // of both behaviours.
+  const recordsEnabled = Boolean(process.env.HISTORY_API_KEY?.trim());
 
   return <AuditConsole enabledRegions={enabledRegions} recordsEnabled={recordsEnabled} />;
 }
