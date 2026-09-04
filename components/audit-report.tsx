@@ -496,6 +496,23 @@ export function AuditReport({
           is closed the way the trade already closes it — a wet signature.
           Printing this makes the record's provisional status impossible to
           overlook. */}
+      {/* -------- sign-off block (print) --------
+          Two DIFFERENT people, deliberately kept apart.
+
+          "Captured by" is a fact the system knows: whoever ran the audit, from
+          inspector_id. It is printed.
+
+          "Reviewed by" is a claim only a qualified human can make, and it stays
+          blank until one makes it. It is tempting to pre-fill it from whoever is
+          logged in, but access here is a single shared Basic-auth credential — not
+          a person, and holding no licence. Printing that as the reviewer would
+          assert a review that never happened, which is exactly how an advisory
+          screening turns into a false certification. Florida reserves firesafety
+          inspections to inspectors certified under s. 633.216, F.S.; a record
+          naming a "reviewer" who never reviewed is a liability, not a convenience.
+
+          When signoff_by is eventually written by a real accounts system, it
+          prints as a filled value instead of a ruled line. */}
       <div className="kr-print-only kr-avoid-break mt-6 border-t border-[var(--kr-hairline)] pt-5">
         <p className="kr-eyebrow">Review &amp; sign-off</p>
         <p className="mt-2 max-w-3xl text-[10.5px] leading-relaxed text-kr-muted">
@@ -504,14 +521,40 @@ export function AuditReport({
           confirmation by an inspector qualified in the jurisdiction above before any remediation is
           signed off or relied upon.
         </p>
-        <div className="mt-6 grid grid-cols-3 gap-6 text-[10px]">
-          {['Reviewed by', 'Licence / certification no.', 'Date'].map((label) => (
-            <div key={label}>
-              <div className="h-8 border-b border-[var(--kr-hairline)]" />
-              <p className="kr-label mt-1.5">{label}</p>
+
+        <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-1.5 text-[10.5px]">
+          <PrintRow
+            label="Captured by"
+            value={
+              result.inspector_id && result.inspector_id !== 'UNASSIGNED'
+                ? result.inspector_id
+                : 'Not recorded'
+            }
+          />
+          <PrintRow label="Sign-off status" value={result.signoff_status ?? 'PENDING'} />
+        </dl>
+
+        {result.signoff_by ? (
+          <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-1.5 text-[10.5px]">
+            <PrintRow label="Reviewed by" value={result.signoff_by} />
+            <PrintRow label="Reviewed on" value={result.signoff_at ?? undefined} />
+          </dl>
+        ) : (
+          <>
+            <p className="mt-5 text-[10px] leading-relaxed text-kr-muted">
+              To be completed by an inspector qualified in the jurisdiction above. Left blank
+              intentionally — the system cannot attest to a review it did not perform.
+            </p>
+            <div className="mt-3 grid grid-cols-3 gap-6 text-[10px]">
+              {['Reviewed by (signature)', 'Licence / certification no.', 'Date'].map((label) => (
+                <div key={label}>
+                  <div className="h-8 border-b border-[var(--kr-hairline)]" />
+                  <p className="kr-label mt-1.5">{label}</p>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </div>
 
       {actions && <div className="kr-screen-only">{actions}</div>}

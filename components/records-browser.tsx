@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/select';
 import { AlertCircle, ArrowLeft, Printer, Search } from 'lucide-react';
 import { AuditReport, SeverityChip } from '@/components/audit-report';
+import { printAuditReport } from '@/lib/print-report';
 import { REGIONS, type RegionKey } from '@/lib/regions';
 import {
   asArray,
@@ -174,7 +175,7 @@ export function RecordsBrowser({ region }: { region: RegionKey }) {
               Back to results
             </Button>
             <Button
-              onClick={() => window.print()}
+              onClick={() => printAuditReport(selected)}
               className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
             >
               <Printer className="mr-2 h-3.5 w-3.5" />

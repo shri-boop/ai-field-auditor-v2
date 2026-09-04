@@ -15,7 +15,9 @@ import {
 import { AlertCircle, Archive, Printer, ScanLine, Upload } from 'lucide-react';
 import { AuditReport } from '@/components/audit-report';
 import { RecordsBrowser } from '@/components/records-browser';
+import { SiteHistoryNotice } from '@/components/site-history-notice';
 import { BRAND } from '@/lib/brand';
+import { printAuditReport } from '@/lib/print-report';
 import { TONES, type AuditError, type AuditResult } from '@/lib/audit-types';
 import {
   REGIONS,
@@ -279,6 +281,11 @@ export function AuditConsole({
                     onChange={(e) => setSiteId(e.target.value)}
                     className="kr-field kr-data h-12 rounded-md px-4 text-sm placeholder:text-kr-muted/50"
                   />
+                  {/* Context, not a gate. A site is audited repeatedly by design;
+                      what was missing was any signal that it had been seen
+                      before. Requires the records backend, so it is silent when
+                      that is not configured. */}
+                  <SiteHistoryNotice region={region} siteId={siteId} enabled={recordsEnabled} />
                 </section>
 
                 {/* US-only. The India workflow hardcodes NBC 2016 + CFO Mumbai
@@ -554,7 +561,7 @@ export function AuditConsole({
                     actions={
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <Button
-                          onClick={() => window.print()}
+                          onClick={() => printAuditReport(result, siteId)}
                           className="kr-ghost h-12 w-full rounded-md text-[11px] font-bold uppercase tracking-[0.18em]"
                         >
                           <Printer className="mr-2 h-3.5 w-3.5" />
