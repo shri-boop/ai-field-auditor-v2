@@ -6,6 +6,7 @@
         "httpMethod": "POST",
         "path": "audit-field-photo-us",
         "responseMode": "responseNode",
+        "authentication": "headerAuth",
         "options": {}
       },
       "id": "us-webhook-0001",

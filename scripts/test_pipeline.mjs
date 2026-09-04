@@ -541,6 +541,20 @@ section('9. Sandbox safety + regression: the exact request that failed in n8n');
   const pinned = wf.pinData.Webhook[0].json.body;
   check('pinned fixture still present in the built workflow', !!pinned.image_url);
 
+  // Every audit is a paid vision call, so an open webhook is a metered spend
+  // endpoint that anyone who learns the URL can drain.
+  const webhookNode = wf.nodes.find((n) => n.type === 'n8n-nodes-base.webhook');
+  check('the audit webhook requires Header Auth',
+    webhookNode.parameters.authentication === 'headerAuth');
+  // The credential ID is minted by n8n and must not be committed. Absent means the
+  // webhook rejects everything until it is bound in the UI, which is the correct
+  // default for this endpoint.
+  check('no credential is committed for the webhook (fails closed until bound)',
+    webhookNode.credentials === undefined);
+  check('the proxy sends the header the credential will check',
+    readFileSync(join(HERE, '..', 'app', 'api', 'audit', 'route.ts'), 'utf8')
+      .indexOf("AUTH_HEADER = 'x-audit-api-key'") !== -1);
+
   const replay = runPipeline(pinned, jsonOf({
     equipment_type: 'PORTABLE_FIRE_EXTINGUISHER',
     equipment_subtype: 'ABC dry chemical stored pressure',

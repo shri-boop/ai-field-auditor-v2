@@ -236,6 +236,50 @@ What this is not: one shared credential, no logout, no per-user attribution. It
 closes the spend hole and gates the URL. Real accounts arrive with sign-off,
 which legally needs to name a person.
 
+### Webhook authentication (the engine, not the app)
+
+Basic auth protects the **app**. It does nothing for the **engine**: anyone who
+learns an n8n webhook URL can call it directly, and every audit is a paid vision
+call. All three webhooks now require Header Auth.
+
+| Webhook | Header name | Env var | Guards |
+|---|---|---|---|
+| `audit-field-photov2` (IND) | `x-audit-api-key` | `AUDIT_API_KEY` | model spend |
+| `audit-field-photo-us` (US) | `x-audit-api-key` | `AUDIT_API_KEY` | model spend |
+| `audit-history` | `x-audit-history-key` | `HISTORY_API_KEY` | data read |
+
+**One header name for both audit regions**, because `/api/audit` is a single proxy
+serving both. In n8n create **two** credentials — `Audit IND Key` and `Audit US
+Key` — both with header name `x-audit-api-key` and the same value. Two credentials
+sharing one value costs nothing today and means rotating one region later is a
+config change rather than re-plumbing. Optional `AUDIT_API_KEY_IND` /
+`AUDIT_API_KEY_US` overrides exist for that day.
+
+⚠️ **Use a different secret from `HISTORY_API_KEY`.** Records are read-only; the
+audit endpoints spend money per call. If they share a secret, handing the records
+key to a BI tool or a client's dashboard also hands over unlimited model spend, and
+neither can be revoked without breaking the other.
+
+⚠️ **`AUDIT_API_KEY` unset fails OPEN** — no header is sent, which is the previous
+behaviour, with a warning logged per audit. That is the migration path: failing
+closed would mean deploying this code took every audit down before anyone could
+configure it. Once the n8n credential is bound, an unset key stops being silent —
+n8n returns 403 and the API answers `AUDIT_AUTH_REJECTED` naming what to check.
+
+**Order matters. Getting it backwards takes both regions down:**
+
+1. Deploy the code — harmless, n8n ignores a header it is not checking.
+2. Set `AUDIT_API_KEY` in Vercel, then **redeploy** (env changes need one).
+3. Create the two credentials in n8n.
+4. Bind them to the two webhook nodes.
+
+For step 4, **prefer the n8n UI over re-importing the workflows.** Bind the
+credential and switch Authentication to Header Auth by hand — zero downtime.
+Re-importing also works, but between the import landing and the credential being
+bound the webhook rejects everything. The `authentication: headerAuth` now committed
+in both workflow JSONs exists so a *future* re-import does not silently revert the
+setting.
+
 ### Type checking
 
 The Next build does **not** type-check — `next.config.mjs` sets
