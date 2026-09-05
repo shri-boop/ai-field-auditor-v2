@@ -23,7 +23,7 @@
  * missing ISI mark and a discharged cylinder are not the same problem.
  */
 
-const input = $('PARSE_Input').first().json;
+const input = $('VALIDATE_Input').first().json;
 
 // ---------------------------------------------------------------------------
 // CHECKLIST — NBC 2016 Part 4 read with the Maharashtra Fire Prevention and Life

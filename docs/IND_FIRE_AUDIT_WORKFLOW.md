@@ -12,7 +12,7 @@ This document covers `AI_Field_Audit_v2.json`.
 - **Source of truth:** `scripts/nodes/ind_*.js`, written into the JSON by
   `scripts/patch_india_workflow.py`. The JSON is **patched in place**, not
   regenerated — see §6.
-- **Tests:** `node scripts/test_india.mjs` — 215 assertions, no n8n or database
+- **Tests:** `node scripts/test_india.mjs` — 229 assertions, no n8n or database
 
 ---
 
@@ -27,7 +27,7 @@ confusion about this project comes from assuming otherwise.
 | Code basis | one hardcoded prompt string | runtime registry, 9 jurisdictions |
 | Maintenance | JSON patched in place from `scripts/nodes/ind_*.js` | JSON generated whole from `scripts/nodes/*.js` |
 | Nodes | 18 (2 orphaned) | 23 |
-| Test coverage | 215 offline assertions | 110 offline assertions |
+| Test coverage | 229 offline assertions | 110 offline assertions |
 | Status derivation | derived in code from severity counts | derived in code from severity counts |
 | Findings model | CRITICAL / MAJOR / MINOR + citation, **no SLA tier** | same tiers, plus per-tier SLA (0 h / 72 h / 30 d) |
 | Input validation | SSRF guard + structured HTTP 400 | same, plus jurisdiction/occupancy fields |
@@ -55,7 +55,7 @@ clocks; a Maharashtra owner works to Form B's half-yearly calendar, so copying
 
 ```
 Webhook
-  └─ PARSE_Input                ind_01_validate_input.js
+  └─ VALIDATE_Input             ind_01_validate_input.js
       │                         SSRF-guards image_url; emits validation_ok,
       │                         never throws
       └─ ROUTE_Validation       switch on `validation_ok`
@@ -204,12 +204,25 @@ Content-Type: application/json
 }
 ```
 
-`image_url` is the only required field. `asset_tag` and `inspector_id` were added
-with migration 003 (see §6).
+**`image_url` and `site_id` are both required.** `asset_tag` and `inspector_id` are
+optional and were added with migration 003 (see §6).
 
-**No SSRF guard.** Unlike the US workflow, `image_url` is accepted as given and
-handed to OpenRouter. There is no scheme check, no host allow-list and no
-private-range refusal. See §7.4.
+`site_id` used to be optional, defaulting to the string `'unknown'` in the workflow
+and to `'UNKNOWN-SITE'` in the `/api/audit` proxy. Both defaults were removed: an
+audit that is not attached to a building cannot be retrieved by Records, billed, or
+included in a half-yearly Form B pack, so it consumed a paid vision call to produce
+a record nobody can use. A missing `site_id` is now `SITE_ID_MISSING` → HTTP 400,
+from the proxy and from `VALIDATE_Input` independently.
+
+`site_id` is **upper-cased and trimmed**. The Records query matches exactly
+(`WHERE site_id = $1`), so `site-mum-401` and `SITE-MUM-401` would otherwise be two
+different buildings — a technician varying the case between visits would produce two
+partial histories, and a Form B pack assembled from one of them would be quietly
+incomplete. Migration 005 normalises the rows already in the table and adds a CHECK
+constraint so the invariant does not depend on one node's good behaviour.
+
+**SSRF guard.** `image_url` must be https on an allow-listed object-store host, with
+no userinfo, no IP literals and no private ranges. See §7.4.
 
 ### Response (HTTP 200)
 
@@ -297,7 +310,7 @@ Bad input gets a structured **HTTP 400** from `RESPOND_BadRequest`:
 {
   "status": "REJECTED",
   "error_code": "IMAGE_HOST_NOT_ALLOWED",
-  "error": "Image host is not allow-listed: evil.example.com. Add it to ALLOWED_IMAGE_HOSTS in PARSE_Input if this is intentional.",
+  "error": "Image host is not allow-listed: evil.example.com. Add it to ALLOWED_IMAGE_HOSTS in VALIDATE_Input if this is intentional.",
   "received_value": "https://evil.example.com/x.jpg",
   "advisory_only": true
 }
@@ -308,7 +321,7 @@ Bad input gets a structured **HTTP 400** from `RESPOND_BadRequest`:
 `IMAGE_URL_IP_LITERAL`, `IMAGE_HOST_NOT_ALLOWED` or `IMAGE_HOST_PRIVATE`.
 `received_value` is truncated to 200 characters.
 
-`PARSE_Input` deliberately does **not** throw. A throw aborts the execution before
+`VALIDATE_Input` deliberately does **not** throw. A throw aborts the execution before
 `Respond_to_Webhook1` runs, which is what used to leave the caller with an empty
 body and no way to tell a bad request from a broken workflow (§7.5).
 
@@ -379,6 +392,15 @@ flat human-readable line, kept for continuity with every row written before it.
 - `004_field_audit_logs_severity.sql` — adds the eleven severity-model columns
   above, a partial index on `critical`, and `(status, created_at DESC)` for the
   Records status filter.
+- `005_field_audit_logs_site_id.sql` — normalises `site_id` to `upper(btrim(...))`
+  and adds a CHECK constraint so it stays that way. Verified against production
+  before it was written: the collision query returned 0 rows and there were no
+  `'unknown'` / `''` rows, so **the UPDATE is a safety net and is expected to
+  report 0 rows changed.** It is deliberately not built out into a collision-merge
+  procedure for a scenario that is not present. The constraint is the part that
+  carries forward — it means the identity of the audited building no longer depends
+  on one node behaving well, which matters once anything other than
+  `VALIDATE_Input` can write to this table.
 
 All are fully guarded: they verify the table and each column first and skip
 cleanly, because that table's shape cannot be proved from source control. All are
@@ -409,7 +431,7 @@ to drop.
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 215 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 229 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
@@ -572,7 +594,7 @@ briefly unavailable — with the finding already computed and sitting in memory.
 (OpenRouter), which made the audit webhook a request-forgery primitive aimed at
 whatever host the caller named. India previously accepted anything.
 
-`PARSE_Input` (`scripts/nodes/ind_01_validate_input.js`, ported from the US
+`VALIDATE_Input` (`scripts/nodes/ind_01_validate_input.js`, ported from the US
 `scripts/nodes/01_validate_input.js`) now requires https, matches the host against
 an allow-list of object stores, and refuses userinfo, IPv6 literals and private
 ranges. The allow-list is deliberately byte-identical to the US one: both regions
@@ -594,7 +616,7 @@ Two details worth keeping:
 
 ### ✅ 7.5 Structured errors instead of throwing — SHIPPED
 
-`PARSE_Input` used to `throw` on a missing `image_url`. A throw aborts the
+`VALIDATE_Input` (named `PARSE_Input` at the time) used to `throw` on a missing `image_url`. A throw aborts the
 execution before `Respond_to_Webhook1` runs, so the caller received HTTP 500 with
 an empty body and no way to distinguish "I sent you a bad URL" from "your workflow
 is broken".
@@ -642,7 +664,7 @@ must not do. If the fallback fails too it continues rather than aborting, so
 
 ### ✅ 7.7 Offline tests — SHIPPED
 
-`scripts/test_india.mjs`, 215 assertions, no n8n, no database, no model call. It
+`scripts/test_india.mjs`, 229 assertions, no n8n, no database, no model call. It
 runs under the same restricted sandbox as `test_pipeline.mjs` — globals the n8n
 `vm` context does not reliably provide (`URL`, `Buffer`, `process`, `fetch`, …) are
 shadowed as undefined, because a friendlier harness once let a `new URL(...)`
@@ -778,7 +800,7 @@ These are not India-specific — see the US document for detail:
 | Derived status | ✅ computed in code from severities (7.1) |
 | Severity tiers | ✅ CRITICAL / MAJOR / MINOR + risk score (7.2) |
 | DB failure tolerance | ✅ `continueRegularOutput`, reports `persisted: false` (7.3) |
-| Offline tests | ✅ 215 assertions, restricted sandbox (7.7) |
+| Offline tests | ✅ 229 assertions, restricted sandbox (7.7) |
 | Notifier escaping | ✅ Telegram / Slack / email all escaped |
 | Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
 | Statute stated correctly in the **prompt** | ✅ with IS 2190 / IS 15683 citations (7.10) |
@@ -795,7 +817,7 @@ These are not India-specific — see the US document for detail:
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored
 alongside it, a database outage degrades the audit instead of discarding it, the
-notifier no longer loses messages to an unescaped ampersand, and 215 assertions run
+notifier no longer loses messages to an unescaped ampersand, and 229 assertions run
 without touching production.
 
 Input hardening (7.4, 7.5) and availability (7.6) are now closed too: a
