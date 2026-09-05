@@ -393,14 +393,34 @@ flat human-readable line, kept for continuity with every row written before it.
   above, a partial index on `critical`, and `(status, created_at DESC)` for the
   Records status filter.
 - `005_field_audit_logs_site_id.sql` — normalises `site_id` to `upper(btrim(...))`
-  and adds a CHECK constraint so it stays that way. Verified against production
-  before it was written: the collision query returned 0 rows and there were no
-  `'unknown'` / `''` rows, so **the UPDATE is a safety net and is expected to
-  report 0 rows changed.** It is deliberately not built out into a collision-merge
-  procedure for a scenario that is not present. The constraint is the part that
-  carries forward — it means the identity of the audited building no longer depends
-  on one node behaving well, which matters once anything other than
-  `VALIDATE_Input` can write to this table.
+  and adds a CHECK constraint so it stays that way.
+
+  **Applied to production 2026-09-05. It corrected 3 rows, having been predicted
+  to change 0.** The prediction came from a pre-flight collision query
+  (`HAVING count(DISTINCT site_id) > 1`), which answers *"will two buildings
+  merge?"* — correctly 0 — and not *"is any row un-normalised?"*, which was 3. A
+  row stored lower-case with no upper-case sibling has one spelling and is
+  invisible to that filter. **Both questions need asking; they are not the same
+  question.** Before any future normalising migration, run:
+
+  ```sql
+  -- will anything MERGE?  (identity risk)
+  SELECT upper(btrim(site_id)), count(*), array_agg(DISTINCT site_id)
+  FROM field_audit_logs GROUP BY 1 HAVING count(DISTINCT site_id) > 1;
+
+  -- is anything UN-NORMALISED?  (row count that will change)
+  SELECT count(*) FROM field_audit_logs
+   WHERE site_id IS NOT NULL AND site_id <> upper(btrim(site_id));
+  ```
+
+  The outcome was safe because `collisions = 0` is the load-bearing number and it
+  held: no building's history was merged, split or reattributed. It was a small
+  *repair* rather than hygiene — those 3 rows were previously unreachable by anyone
+  searching the canonical upper-case id, since Records matches exactly.
+
+  The constraint is the part that carries forward: the identity of the audited
+  building no longer depends on one node behaving well, which matters once anything
+  other than `VALIDATE_Input` can write to this table.
 
 All are fully guarded: they verify the table and each column first and skip
 cleanly, because that table's shape cannot be proved from source control. All are
@@ -812,6 +832,8 @@ These are not India-specific — see the US document for detail:
 | Sign-off columns and write path | ❌ none (7.8, 7.9) |
 | Form B support (half-yearly evidence pack) | ❌ researched, not built (7.9) |
 | Webhook authentication | ✅ Header Auth bound; unauthenticated POST returns 403 (7.11) |
+| `site_id` required + normalised | ✅ `SITE_ID_MISSING` → 400; `upper(btrim(...))` + CHECK constraint (migration 005) |
+| Node-name reference drift | ✅ every `$('node')` reference asserted to resolve, in Code nodes and expressions |
 | `audit_timestamp` column type | ❌ still `text` (§5) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
