@@ -58,6 +58,33 @@
 --
 -- Add NOT NULL in a later migration once no post-auth row has a null org_id.
 --
+-- ⚠️⚠️ THIS MIGRATION DOES NOT MAKE THE SYSTEM SAFE FOR TWO CUSTOMERS ⚠️⚠️
+-- ---------------------------------------------------------------------------
+-- It adds the column, the indexes, and the guarantee that a caller cannot inject a
+-- tenant scope. It does NOT deliver tenant isolation, and nothing here should be read
+-- as saying it does.
+--
+-- What is still true after this migration:
+--
+--   * NOTHING POPULATES org_id. New rows are NULL. There is no session in the audit
+--     path to derive an organisation from until SIGNOFF_DESIGN section 11 step 4.
+--   * NO READ PATH FILTERS ON IT. The Records query in build_history_workflow.py
+--     still filters on site_id alone, and site_id is caller-supplied.
+--   * ONE SHARED HTTP BASIC CREDENTIAL still serves every user.
+--
+-- So a user in one organisation could still read another's audits by guessing a
+-- site_id, and two customers who both name a building SITE-001 would still share
+-- rows. This migration makes that FIXABLE; it does not fix it.
+--
+-- DO NOT ONBOARD A SECOND CUSTOMER until all three are true:
+--   1. authentication exists and the proxy resolves a real org_id (steps 4-5)
+--   2. every read path filters on that server-derived org_id, not on request input
+--   3. org_id is NOT NULL, verified with zero nulls on post-auth rows
+--
+-- Written at length because a schema that looks multi-tenant is exactly the thing that
+-- produces false confidence six months from now, when the reasoning has been forgotten
+-- and only the column remains.
+--
 -- ⚠️ org_id MUST NEVER BE CALLER-SUPPLIED
 -- ---------------------------------------
 -- That is the mistake site_id already makes and the reason this migration is
@@ -166,8 +193,29 @@ CREATE INDEX IF NOT EXISTS idx_fas_org
 
 -- ---------------------------------------------------------------------------
 -- 6. Pending-signoff views gain org_id, so the queue can be scoped per tenant.
+--
+-- DROP then CREATE, not CREATE OR REPLACE.
+--
+-- CREATE OR REPLACE VIEW can only APPEND columns; it cannot reorder or rename
+-- existing ones. Migration 007 created this view with audit_id first, so replacing it
+-- with org_id first is read by Postgres as renaming column 1, and it refuses:
+--
+--     ERROR:  cannot change name of view column "audit_id" to "org_id"
+--
+-- The first attempt at this migration hit exactly that and rolled back whole, which
+-- is why this is worth a comment rather than a silent reordering.
+--
+-- org_id leads deliberately rather than being appended at the end where REPLACE would
+-- have tolerated it: it is the primary scoping key, and a column list starting with it
+-- is a standing reminder that every query against this view must filter on it.
+--
+-- DROP ... IF EXISTS without CASCADE is the safe form. If anything ever comes to
+-- depend on this view, the DROP fails loudly here instead of silently taking the
+-- dependent object with it.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_fal_awaiting_signoff AS
+DROP VIEW IF EXISTS v_fal_awaiting_signoff;
+
+CREATE VIEW v_fal_awaiting_signoff AS
 SELECT org_id,
        audit_id,
        id AS record_id,

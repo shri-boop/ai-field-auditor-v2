@@ -22,7 +22,7 @@
  * Run:  node scripts/test_signoff_sql.mjs
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -316,6 +316,85 @@ section('9. Migration 008 — the row lock, and 007 marked superseded');
   check('both verify scripts report detail only on failure',
     /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(VER) &&
     /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(FNVER));
+}
+
+// ===========================================================================
+section('9a. A view redefined across migrations must be DROPped first');
+{
+  // The bug this catches, in full: CREATE OR REPLACE VIEW can only APPEND columns.
+  // It cannot reorder or rename existing ones. 007 created v_fal_awaiting_signoff
+  // with audit_id first; 009 redefined it with org_id first, and Postgres read that
+  // as renaming column 1 and refused —
+  //
+  //   ERROR: cannot change name of view column "audit_id" to "org_id"
+  //
+  // — aborting the whole migration. Nothing statically distinguishes a safe append
+  // from an unsafe reorder, so the rule enforced here is the blunt one: if a later
+  // migration redefines a view an earlier migration already created, it must DROP it
+  // first. That is always safe and costs nothing.
+  const allMigrations = readdirSync(join(REPO, 'scripts', 'db'))
+    .filter(function (f) { return /^\d{3}_.*\.sql$/.test(f) && f.indexOf('_verify') === -1; })
+    .sort();
+
+  const createdIn = {};   // view name -> first migration that created it
+  const problems = [];
+
+  allMigrations.forEach(function (file) {
+    const body = readFileSync(join(REPO, 'scripts', 'db', file), 'utf8');
+    const code = body.split('\n')
+      .filter(function (l) { return l.trim().startsWith('--') === false; })
+      .join('\n');
+
+    const re = /CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi;
+    let m;
+    while ((m = re.exec(code)) !== null) {
+      const view = m[1];
+      if (createdIn[view] === undefined) {
+        createdIn[view] = file;
+        continue;
+      }
+      if (createdIn[view] === file) continue;
+      // Redefinition in a later migration. Require a DROP before it.
+      const dropRe = new RegExp('DROP\\s+VIEW\\s+IF\\s+EXISTS\\s+' + view, 'i');
+      const dropAt = code.search(dropRe);
+      if (dropAt === -1 || dropAt > m.index) {
+        problems.push(file + ' redefines ' + view + ' (created in ' + createdIn[view] +
+          ') without dropping it first');
+      }
+    }
+  });
+
+  check('the scan found views defined across more than one migration',
+    Object.keys(createdIn).length >= 3, Object.keys(createdIn).join(','));
+  check('no migration redefines an earlier view without DROP VIEW IF EXISTS first',
+    problems.length === 0, problems.join('; '));
+  check('009 drops the view it redefines',
+    /DROP VIEW IF EXISTS v_fal_awaiting_signoff/.test(ORG));
+  check('and explains why REPLACE could not work',
+    /can only APPEND columns/.test(ORG));
+  // Without CASCADE, so a future dependency fails loudly rather than being removed.
+  check('the DROP is not CASCADE', /DROP VIEW IF EXISTS v_fal_awaiting_signoff;/.test(ORG));
+}
+
+// ===========================================================================
+section('9b. 009 is explicit that it does NOT deliver tenant isolation');
+{
+  // A schema that looks multi-tenant is what produces false confidence later, when
+  // the reasoning is forgotten and only the column remains.
+  check('the migration states outright that it does not make the system multi-tenant-safe',
+    /DOES NOT MAKE THE SYSTEM SAFE FOR TWO CUSTOMERS/.test(ORG));
+  check('it says nothing populates org_id yet', /NOTHING POPULATES org_id/.test(ORG));
+  check('it says no read path filters on it', /NO READ PATH FILTERS ON IT/.test(ORG));
+  check('it names the three conditions for isolation',
+    /DO NOT ONBOARD A SECOND CUSTOMER/.test(ORG));
+
+  // The claim above must stay TRUE until the read paths change. If someone adds an
+  // org_id filter to the history query, this assertion fails and the warning has to
+  // be revisited — which is the point.
+  const HIST = readFileSync(join(REPO, 'scripts', 'build_history_workflow.py'), 'utf8');
+  check('the warning is still accurate: the Records query does not filter on org_id',
+    /org_id/.test(HIST) === false,
+    'build_history_workflow.py now mentions org_id — revisit the 009 warning and \u00a717.4');
 }
 
 // ===========================================================================
