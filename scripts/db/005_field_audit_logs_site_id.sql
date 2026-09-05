@@ -19,20 +19,49 @@
 -- This migration brings the rows already in the table onto the same footing, so
 -- new and historical rows describe the same building with the same string.
 --
--- STATE OF PRODUCTION AT THE TIME OF WRITING
--- ------------------------------------------
--- Verified on ai-stack-prod before writing this:
+-- WHAT THIS ACTUALLY DID IN PRODUCTION (applied 2026-09-05, ai-stack-prod)
+-- -----------------------------------------------------------------------
+--     NOTICE:  005: rows whose site_id changes: 3
+--     NOTICE:  005: normalised values with more than one raw spelling: 0
+--     UPDATE 3
 --
---   * the collision query returned 0 rows — no site_id has split across case
---     variants yet
---   * count of site_id IN ('unknown','UNKNOWN','') was 0
+-- This migration was predicted to be a no-op. It was not: it corrected 3 rows.
+-- The prediction was wrong because the pre-flight check asked the wrong question.
 --
--- So the UPDATE below is a **safety net, not a repair**. It is written to be a
--- no-op against the data as it stands and is deliberately not built out into a
--- collision-merge procedure for a collision scenario that does not exist. If it
--- reports 0 rows updated, that is the expected result and confirms the finding.
+-- The check that was run beforehand was the COLLISION query:
 --
--- Idempotent and safe to re-run.
+--     GROUP BY upper(btrim(site_id)) HAVING count(DISTINCT site_id) > 1
+--
+-- which answers "will any two buildings MERGE into one?" — correctly 0. It does
+-- NOT answer "is any row un-normalised?", because a row stored as
+-- 'site-ban-502' with no upper-case sibling has exactly one spelling and so is
+-- invisible to a HAVING count(DISTINCT ...) > 1 filter. The right pre-flight
+-- question is the one this migration itself reports on:
+--
+--     SELECT count(*) FROM field_audit_logs
+--      WHERE site_id IS NOT NULL AND site_id <> upper(btrim(site_id));
+--
+-- Both questions matter and they are not the same. Ask both next time.
+--
+-- WHY THE OUTCOME WAS STILL SAFE
+-- ------------------------------
+-- collisions = 0 is the load-bearing number, and it held. No building's history
+-- was merged, split, or reattributed; 3 rows had their casing corrected in place
+-- and each was the only spelling of its own site, so none of them joined another
+-- building's history.
+--
+-- It was in fact a small repair rather than pure hygiene: before this ran, those
+-- 3 rows could not be found by anyone searching the canonical upper-case site id,
+-- because the Records query matches exactly. They are now reachable.
+--
+-- The honest cost: the original casing of those 3 rows is not recoverable and the
+-- change was not itself logged to an audit trail. That is acceptable here because
+-- site_id casing is an identifier's spelling, not evidentiary content — no
+-- finding, severity, timestamp or photo reference was touched. It would not be
+-- acceptable for a column that carries evidence, and a future migration that
+-- rewrites one should capture the prior value first.
+--
+-- Idempotent and safe to re-run: a second run reports 0 and changes nothing.
 -- ===========================================================================
 
 BEGIN;
@@ -107,8 +136,10 @@ COMMIT;
 -- ===========================================================================
 -- ROLLBACK
 -- ===========================================================================
--- The case of the original strings is not recoverable — but with 0 rows changed
--- there is nothing to recover. To lift the constraint only:
+-- The case of the original strings is not recoverable. 3 rows were normalised in
+-- production; since no two spellings merged (collisions = 0), nothing was
+-- conflated and there is no integrity concern to unwind — but the prior spellings
+-- of those 3 rows are gone. To lift the constraint only:
 --
 --   ALTER TABLE field_audit_logs
 --       DROP CONSTRAINT IF EXISTS field_audit_logs_site_id_normalised;
