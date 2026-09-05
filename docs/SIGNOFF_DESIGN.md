@@ -1011,7 +1011,32 @@ assert that a spoofed value reaches nothing downstream.
 Ignored rather than rejected: refusing would confirm the field is meaningful and
 invite probing at it, and no legitimate caller sends it.
 
-### 17.4 Nullable, deliberately
+### 17.4 ⚠️ Migration 009 does NOT deliver tenant isolation
+
+Stated prominently because the opposite is easy to assume once the column exists.
+
+009 adds `org_id`, the indexes, and the guarantee that a caller cannot inject a tenant
+scope. **It does not isolate tenants.** After it, all three of these remain true:
+
+| Still true after 009 | Closed by |
+|---|---|
+| Nothing populates `org_id` — new rows are NULL | steps 4–5 (auth + proxy resolves the org) |
+| No read path filters on it — Records filters `site_id` alone | the history workflow change + the proxy |
+| One shared HTTP Basic credential serves every user | step 9 |
+
+So a user in one organisation could still read another's audits by guessing a
+`site_id`, and two customers who both name a building `SITE-001` would still share
+rows. 009 makes that **fixable**, not fixed.
+
+**Do not onboard a second customer** until authentication resolves a real `org_id`,
+every read filters on that server-derived value rather than on request input, and
+`org_id` is `NOT NULL` with zero nulls on post-auth rows.
+
+`scripts/test_signoff_sql.mjs` asserts this warning is still *accurate* — it fails if
+`build_history_workflow.py` starts mentioning `org_id`, which forces this section to be
+revisited rather than left stale.
+
+### 17.5 Nullable, deliberately
 
 Nothing can populate `org_id` yet — `/api/audit` authenticates to n8n with a shared
 key and has no session, so there is nothing to derive an organisation from. `NOT NULL`
@@ -1022,7 +1047,7 @@ built against an unscoped model and then need revisiting. Existing rows are
 backfilled to `ORG-KRATU-INTERNAL` — visibly internal, for the same reason 006 marked
 backfilled identifiers `FA-INB-` rather than blending them in.
 
-### 17.5 Accounts live on Neon
+### 17.6 Accounts live on Neon
 
 Decided. The original framing in §11 — "reachable from Vercel" — was the weakest
 version of the argument. The real reasons:
