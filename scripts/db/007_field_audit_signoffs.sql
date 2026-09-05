@@ -311,6 +311,14 @@ COMMENT ON COLUMN field_audit_logs.signoff_status IS
 -- 6. record_signoff() — the single atomic write path.
 -- ===========================================================================
 --
+-- ⚠️ SUPERSEDED BY MIGRATION 008. The definition below is retained as the record
+-- of what was applied to production on first release; it is NOT the current
+-- function. It reads the audit row's signoff_status without FOR UPDATE, so
+-- check-then-act is not atomic against a concurrent caller and two racing calls can
+-- both write CONFIRMED. See scripts/db/008_record_signoff_row_lock.sql, which is
+-- authoritative, and apply it.
+-- ===========================================================================
+--
 -- Closes SIGNOFF_DESIGN §14.6. The history INSERT and the audit-row UPDATE happen
 -- in one function call, so they cannot half-commit. The n8n workflow at step 5 of
 -- §11 calls this once and passes parameters; it does not compose SQL.
@@ -639,11 +647,15 @@ COMMIT;
 --   1. Run scripts/db/007_verify.sql. It exercises every transition and guard on
 --      this engine and prints PASS/FAIL, inside a transaction it rolls back.
 --
---   2. No workflow re-import is needed for this migration. Nothing in any n8n
+--   2. Apply scripts/db/008_record_signoff_row_lock.sql, which replaces
+--      record_signoff() with a version that locks the audit row. 007 alone leaves
+--      the double-signing guard raceable.
+--
+--   3. No workflow re-import is needed for this migration. Nothing in any n8n
 --      workflow writes to these columns yet — the write path is step 5 of
 --      SIGNOFF_DESIGN 11 and will call record_signoff().
 --
---   3. Do NOT INSERT into field_audit_signoffs directly, from n8n or anywhere
+--   4. Do NOT INSERT into field_audit_signoffs directly, from n8n or anywhere
 --      else. record_signoff() is what makes the history row and the audit-row
 --      index atomic, and what enforces section 6. v_signoff_expired_credential
 --      exists to catch it if something bypasses it anyway.

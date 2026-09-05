@@ -914,4 +914,39 @@ trigger, the absence of a `superseded_by` column — which is the thing most lik
 drift silently as either file changes.
 
 The distinction matters: a green `test_signoff_sql.mjs` is **not** evidence that
-sign-off works. Only `007_verify.sql` is, and it has to be run against the box.
+sign-off works. Only the `*_verify.sql` scripts are, and they have to be run against
+the box.
+
+### 16.1 And a single-session harness has its own blind spot
+
+007 was applied to production and `007_verify.sql` returned **44 passed, 0 failed**.
+The SQL ran correctly first time. It was still wrong.
+
+`record_signoff()` read the audit row's `signoff_status`, checked it against §6's
+transition table, then wrote — with no lock on the read. Under Postgres' default
+READ COMMITTED isolation two concurrent calls both see `PENDING`, both pass the
+check, and both insert `CONFIRMED`. The assertion *"double-signing a confirmed audit
+is refused"* passed, and was bypassable by racing it.
+
+Not theoretical: bulk desk review (§8) is many calls at once by design, a
+double-clicked button is two calls, and n8n retries — `LOG_Audit` already carries
+`retryOnFail` with `maxTries: 3`. The outcome would be two valid-looking signatures
+on one audit, possibly by different people with different attestations, in a table
+that is append-only precisely so it cannot be tidied up afterwards.
+
+**Migration 008** adds `SELECT ... FOR UPDATE` on the audit row. The second caller
+blocks, re-reads `CONFIRMED`, and is refused by the check that was already there.
+
+The lesson is narrower and more useful than "test more": **every assertion in
+`007_verify.sql` runs in one session, and a single-session harness cannot observe a
+race.** Those 44 passes were evidence the function was correct when nobody else was
+calling it, which is a weaker claim than it appeared to be. `008_verify.sql` inspects
+the *deployed* function via `pg_get_functiondef` rather than the file on disk, and
+prints the two-session procedure for watching the race be refused — because that is
+the part no script here can automate.
+
+It is also why 008 is a new migration rather than an edit to 007. 007 is already
+applied; editing it in place would leave a database that ran the old definition
+indistinguishable from one that ran the new definition as far as source control is
+concerned, which is the silent-divergence failure this project has been bitten by
+twice already.
