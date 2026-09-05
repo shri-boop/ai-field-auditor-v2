@@ -564,14 +564,24 @@ section('9. AI_Field_Audit_v2.json wiring');
   // endpoint. audit-history has required Header Auth from the start.
   check('the audit webhook requires Header Auth',
     by.Webhook.parameters.authentication === 'headerAuth');
-  // The credential ID is minted by n8n and must not be committed. Absent means the
-  // webhook rejects everything until it is bound in the UI, which is the correct
-  // default for this endpoint.
-  check('no credential is committed for the webhook (fails closed until bound)',
-    by.Webhook.credentials === undefined);
-  check('the proxy sends the header the credential will check',
+  // Recorded so the workflow imports ready-to-run, like the Postgres credential.
+  // Omitting it would mean a re-import silently drops the binding — and because an
+  // unbound headerAuth webhook fails closed, that presents as every India audit
+  // being rejected rather than as a missing setting.
+  check('the audit webhook has its Header Auth credential bound',
+    by.Webhook.credentials?.httpHeaderAuth?.id === 'aIwM7jr752xJv7Ss',
+    JSON.stringify(by.Webhook.credentials));
+  check('the IND and US webhooks use DIFFERENT credentials',
+    by.Webhook.credentials.httpHeaderAuth.id !== '6MT2Rxb3T92TjMu5');
+  check('the proxy sends the header the credential checks',
     readFileSync(join(REPO, 'app', 'api', 'audit', 'route.ts'), 'utf8')
       .indexOf("AUTH_HEADER = 'x-audit-api-key'") !== -1);
+
+  // Pinned webhook data changes behaviour, and v2's pinData had to be stripped once
+  // already because it contained an operator IP address. All three workflows are
+  // un-pinned in n8n; no artifact may re-pin them on import.
+  check('the workflow carries no pinData',
+    JSON.parse(readFileSync(join(REPO, 'AI_Field_Audit_v2.json'), 'utf8')).pinData === undefined);
   check('LOG_Audit still targets field_audit_logs, not the US table',
     by.LOG_Audit.parameters.table.value === 'field_audit_logs');
   check('the workflow still ships active: true, matching production', wf.active === true);

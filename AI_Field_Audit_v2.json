@@ -17,7 +17,13 @@
         -2544,
         400
       ],
-      "webhookId": "audit-field-photo-v1"
+      "webhookId": "audit-field-photo-v1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "aIwM7jr752xJv7Ss",
+          "name": "Audit IND Key"
+        }
+      }
     },
     {
       "parameters": {

@@ -17,7 +17,13 @@
         -260,
         300
       ],
-      "webhookId": "audit-history-webhook"
+      "webhookId": "audit-history-webhook",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "MkoB7cDK3sEg3FAg",
+          "name": "Audit History Key"
+        }
+      }
     },
     {
       "parameters": {

@@ -17,7 +17,13 @@
         -2600,
         400
       ],
-      "webhookId": "audit-field-photo-us"
+      "webhookId": "audit-field-photo-us",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6MT2Rxb3T92TjMu5",
+          "name": "Audit US Key"
+        }
+      }
     },
     {
       "parameters": {
@@ -713,31 +719,6 @@
   "active": false,
   "settings": {
     "executionOrder": "v1"
-  },
-  "pinData": {
-    "Webhook": [
-      {
-        "json": {
-          "headers": {
-            "content-type": "application/json"
-          },
-          "params": {},
-          "query": {},
-          "body": {
-            "image_url": "https://6tm3ilznpjpkygcc.public.blob.vercel-storage.com/1782305889054-fire_extinguisher_bad.png",
-            "site_id": "SITE-CA-LAX-014",
-            "jurisdiction": "CA",
-            "occupancy_type": "MERCANTILE",
-            "equipment_hint": "PORTABLE_FIRE_EXTINGUISHER",
-            "inspector_id": "TECH-4471",
-            "asset_tag": "EXT-014-03",
-            "osha_workplace": true
-          },
-          "webhookUrl": "https://n8n.kratuailabs.com/webhook/audit-field-photo-us",
-          "executionMode": "test"
-        }
-      }
-    ]
   },
   "meta": {
     "templateCredsSetupCompleted": true

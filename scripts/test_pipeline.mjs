@@ -535,25 +535,53 @@ section('9. Sandbox safety + regression: the exact request that failed in n8n');
   check('no node references a sandbox-unavailable global', offenders.length === 0,
     'offenders: ' + offenders.join(', '));
 
-  // Replay the workflow's own pinned webhook body — this is precisely the
-  // payload that produced "image_url is not a valid absolute URL" in n8n.
   const wf = JSON.parse(readFileSync(join(HERE, '..', 'AI_Field_Audit_US.json'), 'utf8'));
-  const pinned = wf.pinData.Webhook[0].json.body;
-  check('pinned fixture still present in the built workflow', !!pinned.image_url);
 
   // Every audit is a paid vision call, so an open webhook is a metered spend
-  // endpoint that anyone who learns the URL can drain.
+  // endpoint that anyone who learns the URL can drain. Verified enforced against
+  // production: an unauthenticated POST to this path returns 403.
   const webhookNode = wf.nodes.find((n) => n.type === 'n8n-nodes-base.webhook');
   check('the audit webhook requires Header Auth',
     webhookNode.parameters.authentication === 'headerAuth');
-  // The credential ID is minted by n8n and must not be committed. Absent means the
-  // webhook rejects everything until it is bound in the UI, which is the correct
-  // default for this endpoint.
-  check('no credential is committed for the webhook (fails closed until bound)',
-    webhookNode.credentials === undefined);
-  check('the proxy sends the header the credential will check',
+  // Recorded so the workflow imports ready-to-run, like the Postgres credential.
+  // Omitting it would mean a re-import silently drops the binding — and because an
+  // unbound headerAuth webhook fails closed, that presents as every audit being
+  // rejected rather than as a missing setting.
+  check('the audit webhook has its Header Auth credential bound',
+    webhookNode.credentials?.httpHeaderAuth?.id === '6MT2Rxb3T92TjMu5',
+    JSON.stringify(webhookNode.credentials));
+  check('the proxy sends the header the credential checks',
     readFileSync(join(HERE, '..', 'app', 'api', 'audit', 'route.ts'), 'utf8')
       .indexOf("AUTH_HEADER = 'x-audit-api-key'") !== -1);
+
+  // Pinned webhook data changes behaviour — n8n replays the pin instead of the real
+  // request — and request data accumulates things nobody meant to commit. v2's
+  // pinData had to be stripped once because it held an operator IP. All three
+  // workflows are un-pinned in n8n, so no artifact may re-pin them on import.
+  check('the built workflow carries no pinData', wf.pinData === undefined,
+    wf.pinData ? 'pinData keys: ' + Object.keys(wf.pinData).join(',') : '');
+
+  /**
+   * The exact webhook body that once produced "image_url is not a valid absolute
+   * URL" in n8n. It used to live in the workflow's pinData, which is how it
+   * travelled; it lives here now that the artifact is un-pinned. A regression
+   * fixture belongs in the test anyway — here it runs on every invocation rather
+   * than only when someone opens n8n and clicks the node.
+   */
+  const PINNED_REGRESSION_BODY = {
+    image_url: 'https://6tm3ilznpjpkygcc.public.blob.vercel-storage.com/'
+      + '1782305889054-fire_extinguisher_bad.png',
+    site_id: 'SITE-CA-LAX-014',
+    jurisdiction: 'CA',
+    occupancy_type: 'MERCANTILE',
+    equipment_hint: 'PORTABLE_FIRE_EXTINGUISHER',
+    inspector_id: 'TECH-4471',
+    asset_tag: 'EXT-014-03',
+    osha_workplace: true
+  };
+
+  const pinned = PINNED_REGRESSION_BODY;
+  check('the regression fixture is a real absolute URL', /^https:\/\/[^/]+\//.test(pinned.image_url));
 
   const replay = runPipeline(pinned, jsonOf({
     equipment_type: 'PORTABLE_FIRE_EXTINGUISHER',
