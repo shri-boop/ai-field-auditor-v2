@@ -242,43 +242,63 @@ Basic auth protects the **app**. It does nothing for the **engine**: anyone who
 learns an n8n webhook URL can call it directly, and every audit is a paid vision
 call. All three webhooks now require Header Auth.
 
-| Webhook | Header name | Env var | Guards |
-|---|---|---|---|
-| `audit-field-photov2` (IND) | `x-audit-api-key` | `AUDIT_API_KEY` | model spend |
-| `audit-field-photo-us` (US) | `x-audit-api-key` | `AUDIT_API_KEY` | model spend |
-| `audit-history` | `x-audit-history-key` | `HISTORY_API_KEY` | data read |
+| Webhook | Header name | n8n credential | Env var | Guards |
+|---|---|---|---|---|
+| `audit-field-photov2` (IND) | `x-audit-api-key` | `Audit IND Key` | `AUDIT_API_KEY` | model spend |
+| `audit-field-photo-us` (US) | `x-audit-api-key` | `Audit US Key` | `AUDIT_API_KEY` | model spend |
+| `audit-history` | `x-audit-history-key` | `Audit History Key` | `HISTORY_API_KEY` | data read |
+
+All three are bound and enforced. Verify any of them with a request that costs
+nothing — `{}` is rejected before the vision call, so this is free to repeat after a
+rotation or a re-import:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://n8n.kratuailabs.com/webhook/audit-field-photov2 \
+  -H 'Content-Type: application/json' -d '{}'
+# 403
+```
 
 **One header name for both audit regions**, because `/api/audit` is a single proxy
-serving both. In n8n create **two** credentials — `Audit IND Key` and `Audit US
-Key` — both with header name `x-audit-api-key` and the same value. Two credentials
-sharing one value costs nothing today and means rotating one region later is a
-config change rather than re-plumbing. Optional `AUDIT_API_KEY_IND` /
-`AUDIT_API_KEY_US` overrides exist for that day.
+serving both. Two credentials sharing one value costs nothing and means rotating one
+region later is a config change rather than re-plumbing — optional
+`AUDIT_API_KEY_IND` / `AUDIT_API_KEY_US` overrides exist for that day.
 
-⚠️ **Use a different secret from `HISTORY_API_KEY`.** Records are read-only; the
-audit endpoints spend money per call. If they share a secret, handing the records
-key to a BI tool or a client's dashboard also hands over unlimited model spend, and
-neither can be revoked without breaking the other.
+**The audit secret is different from `HISTORY_API_KEY`, deliberately.** Records are
+read-only; the audit endpoints spend money per call. If they shared a secret, handing
+the records key to a BI tool or a client's dashboard would also hand over unlimited
+model spend, and neither could be revoked without breaking the other.
 
-⚠️ **`AUDIT_API_KEY` unset fails OPEN** — no header is sent, which is the previous
-behaviour, with a warning logged per audit. That is the migration path: failing
-closed would mean deploying this code took every audit down before anyone could
-configure it. Once the n8n credential is bound, an unset key stops being silent —
-n8n returns 403 and the API answers `AUDIT_AUTH_REJECTED` naming what to check.
+**Credential IDs are committed** in `CRED_WEBHOOK_AUTH` in each builder, so all three
+workflows import ready-to-run — as the Postgres and OpenRouter credentials always
+did. The ID is an opaque reference, not the secret. This matters because an unbound
+`headerAuth` webhook fails closed: a re-import that dropped the binding would present
+as *every audit being rejected*, not as a missing checkbox. Each test suite asserts
+its webhook's credential ID.
 
-**Order matters. Getting it backwards takes both regions down:**
+⚠️ **`AUDIT_API_KEY` unset fails OPEN** — no header is sent, which was the behaviour
+before this existed, with a warning logged per audit. That is the migration path, not
+the destination: failing closed would have meant deploying the code took every audit
+down before anyone could configure it. Now that the credentials are bound an unset key
+is not silent — n8n returns 403 and the API answers `AUDIT_AUTH_REJECTED` naming what
+to check.
 
-1. Deploy the code — harmless, n8n ignores a header it is not checking.
-2. Set `AUDIT_API_KEY` in Vercel, then **redeploy** (env changes need one).
-3. Create the two credentials in n8n.
-4. Bind them to the two webhook nodes.
+**If you ever rotate a key**, the order is: change the value in n8n → update
+`AUDIT_API_KEY` in Vercel → redeploy. In between, audits fail closed with
+`AUDIT_AUTH_REJECTED`, which is the correct direction to fail.
 
-For step 4, **prefer the n8n UI over re-importing the workflows.** Bind the
-credential and switch Authentication to Header Auth by hand — zero downtime.
-Re-importing also works, but between the import landing and the credential being
-bound the webhook rejects everything. The `authentication: headerAuth` now committed
-in both workflow JSONs exists so a *future* re-import does not silently revert the
-setting.
+### No workflow carries `pinData`
+
+None of the three artifacts emits pinned webhook data, and none is pinned in n8n. A
+pinned webhook body makes n8n replay the pin instead of the real request — wrong
+behaviour on a production workflow — and request data accumulates things nobody meant
+to commit: `AI_Field_Audit_v2.json`'s `pinData` had to be stripped once because it
+contained an operator IP address.
+
+The US regression fixture that used to live there is now `PINNED_REGRESSION_BODY` in
+`scripts/test_pipeline.mjs`, where it runs on every invocation rather than only when
+someone opens n8n. All three suites assert their artifact has no `pinData`, so a
+future export-and-paste cannot reintroduce it.
 
 ### Type checking
 

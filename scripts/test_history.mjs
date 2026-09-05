@@ -247,6 +247,20 @@ check('a pre-migration IND row yields null, not undefined, for the new columns',
   indLegacy.image_url === null);
 check('webhook requires header auth',
   nodeByName.Webhook.parameters.authentication === 'headerAuth');
+// Recorded so the workflow imports ready-to-run. Omitting it would mean a re-import
+// silently drops the binding, and an unbound headerAuth webhook rejects everything.
+check('webhook has its Header Auth credential bound',
+  nodeByName.Webhook.credentials?.httpHeaderAuth?.id === 'MkoB7cDK3sEg3FAg',
+  JSON.stringify(nodeByName.Webhook.credentials));
+// Records are read-only; the audit webhooks spend money per call. Sharing one
+// secret would mean handing this key to a BI tool also hands over model spend.
+check('records auth is a DIFFERENT credential from either audit webhook',
+  ['6MT2Rxb3T92TjMu5', 'aIwM7jr752xJv7Ss']
+    .indexOf(nodeByName.Webhook.credentials.httpHeaderAuth.id) === -1);
+check('the records proxy sends x-audit-history-key, not the audit header',
+  readFileSync(join(HERE, '..', 'app', 'api', 'history', 'route.ts'), 'utf8')
+    .indexOf("AUTH_HEADER = 'x-audit-history-key'") !== -1);
+check('the built workflow carries no pinData', wf.pinData === undefined);
 check('both query nodes always output data, so a miss still reaches SHAPE_Results',
   nodeByName.QUERY_US.alwaysOutputData === true && nodeByName.QUERY_IND.alwaysOutputData === true);
 check('workflow ships inactive', wf.active === false);

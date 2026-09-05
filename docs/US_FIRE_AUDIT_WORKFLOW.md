@@ -427,7 +427,7 @@ Verified working in production as of 2026-09-04.
 | Work order / CMMS push | ⚠️ node ships **disabled** — see 11.3 |
 | Sign-off (`signoff_by` / `signoff_at`) | ❌ **no write path exists** — see 11.1 |
 | Server-generated PDF | ❌ not built |
-| n8n webhook authentication | ⚠️ code shipped; **bind the credential in n8n** — see 11.4 |
+| n8n webhook authentication | ✅ Header Auth bound on all three webhooks — see 11.4 |
 
 ---
 
@@ -530,7 +530,7 @@ Remaining:
   `audit_id` is already passed as `external_id` for exactly this.
 - Replace silent failure with a real error path once a target exists.
 
-### ✅ 11.4 Authenticate the n8n audit webhooks — CODE SHIPPED, needs binding in n8n
+### ✅ 11.4 Authenticate the n8n audit webhooks — DONE, verified in production
 
 Both audit webhooks had `authentication: NONE`. The Basic auth on the app protects
 the *app*, not the *engine* — anyone who learned a webhook URL could run audits
@@ -564,21 +564,52 @@ not the destination: failing closed would mean deploying the code took every aud
 down before anyone could configure it. Once the credential is bound the silence
 ends, because n8n starts returning 403.
 
-#### ⚠️ Remaining steps, in this order
+#### Verified enforced
 
-Getting these backwards takes **both** regions down.
+An unauthenticated POST to either audit path returns **403**:
 
-1. Deploy the code. Harmless — n8n ignores a header it is not checking.
-2. Set `AUDIT_API_KEY` in Vercel, then **redeploy** (env changes need one).
-3. In n8n, create two `httpHeaderAuth` credentials, both with header name
-   `x-audit-api-key` and the same value.
-4. Bind them to the two webhook nodes.
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://n8n.kratuailabs.com/webhook/audit-field-photo-us \
+  -H 'Content-Type: application/json' -d '{}'
+# 403
+```
 
-For step 4, **prefer the n8n UI over re-importing** — bind the credential and set
-Authentication to Header Auth on the webhook node by hand. Re-importing works, but
-between the import landing and the credential being bound the webhook rejects
-everything. The JSON change exists so a *future* re-import does not silently revert
-the setting.
+`{}` costs nothing: `VALIDATE_Input` rejects it before the vision call, so this is a
+free check to repeat after any credential rotation or workflow re-import.
+
+#### Credential bindings are recorded in the builders
+
+| Webhook | Credential | ID |
+|---|---|---|
+| `audit-field-photo-us` | `Audit US Key` | `6MT2Rxb3T92TjMu5` |
+| `audit-field-photov2` | `Audit IND Key` | `aIwM7jr752xJv7Ss` |
+| `audit-history` | `Audit History Key` | `MkoB7cDK3sEg3FAg` |
+
+The IDs live in `CRED_WEBHOOK_AUTH` in each builder, so all three workflows import
+ready-to-run — exactly as the Postgres and OpenRouter credentials already did. The ID
+is an opaque reference, **not** the secret; the key values live only in n8n and in
+`AUDIT_API_KEY` / `HISTORY_API_KEY`.
+
+They were deliberately omitted when the auth was first added, because nothing was
+bound and an unbound `headerAuth` webhook fails closed — the safe default at that
+point. Now that they are bound, omitting them is the more dangerous option: a
+re-import would silently drop the binding, and fail-closed then presents as *every
+audit being rejected* rather than as a missing setting. Each test suite asserts its
+webhook's credential ID for that reason.
+
+#### No workflow carries `pinData` any more
+
+All three were un-pinned in n8n, and no builder emits `pinData`. Two reasons: a pinned
+webhook body makes n8n replay the pin instead of the real request, which is the wrong
+behaviour on a production workflow; and request data accumulates things nobody meant
+to commit — the India workflow's `pinData` had to be stripped once because it contained
+an operator IP address.
+
+The US regression fixture that lived there — the payload that once produced *"image_url
+is not a valid absolute URL"* — is now `PINNED_REGRESSION_BODY` in
+`scripts/test_pipeline.mjs`, where it runs on every invocation instead of only when
+someone opens n8n.
 
 ### 11.5 Server-generated PDF
 

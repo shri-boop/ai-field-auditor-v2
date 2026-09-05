@@ -24,6 +24,16 @@ OUT = os.path.join(REPO, "AI_Field_Audit_History.json")
 # Reused from the audit workflows so this imports ready-to-run on the same n8n.
 CRED_POSTGRES = {"postgres": {"id": "n7fXon6ujJTrnF7w", "name": "Postgres account"}}
 
+# Webhook Header Auth, header name x-audit-history-key, sent by
+# app/api/history/route.ts from HISTORY_API_KEY.
+#
+# A DIFFERENT credential and a different secret from the two audit webhooks, on
+# purpose: this endpoint is read-only, those two spend money on every call. Sharing
+# one secret would mean handing this key to a BI tool or a client's read-only
+# dashboard also hands over unlimited model spend, with no way to revoke one
+# without breaking the other.
+CRED_WEBHOOK_AUTH = {"httpHeaderAuth": {"id": "MkoB7cDK3sEg3FAg", "name": "Audit History Key"}}
+
 WEBHOOK_PATH = "audit-history"
 US_TABLE = "field_audit_us_logs"
 IND_TABLE = "field_audit_logs"
@@ -179,10 +189,8 @@ def build():
                 "responseMode": "responseNode",
                 # Header Auth, not a secret compared in a Code node: the sandbox
                 # blocks env access, so an in-JS comparison would mean committing
-                # the secret to this repo. Bind an httpHeaderAuth credential in
-                # the n8n UI after import — until then the webhook refuses every
-                # request, which is the correct default for a data-retrieval
-                # endpoint over an append-only safety log.
+                # the secret to this repo. The credential below binds it; the
+                # secret VALUE stays in n8n and in HISTORY_API_KEY.
                 "authentication": "headerAuth",
                 "options": {},
             },
@@ -192,6 +200,7 @@ def build():
             "typeVersion": 2,
             "position": [-260, 300],
             "webhookId": "audit-history-webhook",
+            "credentials": CRED_WEBHOOK_AUTH,
         },
         code_node("0002-validate", "VALIDATE_Query", "history_01_validate_query.js", [-40, 300]),
         {

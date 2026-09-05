@@ -599,19 +599,16 @@ re-import.
 
 These are not India-specific — see the US document for detail:
 
-- **✅ Authenticate the webhook — code shipped, needs binding in n8n.**
-  `/webhook/audit-field-photov2` now carries `authentication: headerAuth` and
-  `app/api/audit/route.ts` sends header **`x-audit-api-key`** from `AUDIT_API_KEY`.
-  No credential is committed (n8n mints the ID), so it **fails closed until bound**
-  in the n8n UI — create a credential labelled `Audit IND Key`, header name
-  `x-audit-api-key`.
+- **✅ Authenticate the webhook — DONE, verified in production.**
+  `/webhook/audit-field-photov2` carries `authentication: headerAuth` bound to
+  credential `Audit IND Key` (`aIwM7jr752xJv7Ss`), and `app/api/audit/route.ts` sends
+  header **`x-audit-api-key`** from `AUDIT_API_KEY`. An unauthenticated POST returns
+  **403**; `{}` costs nothing to test because `PARSE_Input` throws before the vision
+  call.
 
-  Use a **different secret from `HISTORY_API_KEY`**: records are read-only, this
-  endpoint spends money on every call.
-
-  ⚠️ **Order matters — getting it backwards takes India audits down.** Deploy the
-  code first (n8n ignores a header it is not checking), then set `AUDIT_API_KEY` and
-  redeploy, then bind the credential. Full detail in the US document §11.4.
+  The secret is **different from `HISTORY_API_KEY`** on purpose: records are
+  read-only, this endpoint spends money on every call. Full detail, including why the
+  credential IDs are now committed, in the US document §11.4.
 - **Email alerts.** The Gmail node ships disabled. Its recipient was a hardcoded
   personal address and now resolves from
   `{{ $env.AUDIT_ALERT_EMAIL_TO || 'alerts@kratuailabs.com' }}`, so the worst case
@@ -647,7 +644,7 @@ These are not India-specific — see the US document for detail:
 | Timeout / retry / fallback model | ❌ none (7.6) |
 | Sign-off columns and write path | ❌ none (7.8, 7.9) |
 | Form B support (half-yearly evidence pack) | ❌ researched, not built (7.9) |
-| Webhook authentication | ⚠️ code shipped; **bind the credential in n8n** (7.11) |
+| Webhook authentication | ✅ Header Auth bound; unauthenticated POST returns 403 (7.11) |
 | `audit_timestamp` column type | ❌ still `text` (§5) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
@@ -658,5 +655,4 @@ without touching production.
 
 What remains open is a different class of problem: input hardening (7.4, 7.5) and
 availability (7.6). The unauthenticated webhook (7.11) — the one item that was
-actively costing money — now has its code shipped and needs only the n8n credential
-bound.
+actively costing money — is closed and verified.

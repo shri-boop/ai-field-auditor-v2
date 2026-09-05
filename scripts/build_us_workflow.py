@@ -23,6 +23,19 @@ OUT = os.path.join(REPO, "AI_Field_Audit_US.json")
 
 # Credential IDs are reused from the existing India workflow so the US workflow
 # imports ready-to-run on the same n8n instance.
+# Webhook Header Auth, header name x-audit-api-key, sent by app/api/audit/route.ts.
+#
+# Recorded here for the same reason the five credentials below are: so the workflow
+# imports ready-to-run on this n8n. The ID is an opaque reference, not the secret —
+# the key value never leaves n8n.
+#
+# It was deliberately omitted when the auth was first added, because nothing was
+# bound yet and an unbound headerAuth webhook fails closed, which was the safe
+# default. Now that it IS bound, omitting it is the more dangerous option: a
+# re-import would silently drop the binding, and fail-closed then means the webhook
+# rejects every audit until someone notices.
+CRED_WEBHOOK_AUTH = {"httpHeaderAuth": {"id": "6MT2Rxb3T92TjMu5", "name": "Audit US Key"}}
+
 CRED_OPENROUTER = {"httpHeaderAuth": {"id": "Yo4OGxALKxIBKco8", "name": "OpenRouter"}}
 CRED_POSTGRES = {"postgres": {"id": "n7fXon6ujJTrnF7w", "name": "Postgres account"}}
 CRED_TELEGRAM = {"telegramApi": {"id": "0JbTkG1AwoZemMu1", "name": "psylentbot"}}
@@ -107,6 +120,7 @@ def build():
         "typeVersion": 2,
         "position": [-2600, 400],
         "webhookId": "audit-field-photo-us",
+        "credentials": CRED_WEBHOOK_AUTH,
     })
 
     # ------------------------------------------------------- validate + resolve
@@ -526,30 +540,29 @@ def build():
         "connections": connections,
         "active": False,
         "settings": {"executionOrder": "v1"},
-        "pinData": {
-            "Webhook": [
-                {
-                    "json": {
-                        "headers": {"content-type": "application/json"},
-                        "params": {},
-                        "query": {},
-                        "body": {
-                            "image_url": "https://6tm3ilznpjpkygcc.public.blob.vercel-storage.com/"
-                                         "1782305889054-fire_extinguisher_bad.png",
-                            "site_id": "SITE-CA-LAX-014",
-                            "jurisdiction": "CA",
-                            "occupancy_type": "MERCANTILE",
-                            "equipment_hint": "PORTABLE_FIRE_EXTINGUISHER",
-                            "inspector_id": "TECH-4471",
-                            "asset_tag": "EXT-014-03",
-                            "osha_workplace": True,
-                        },
-                        "webhookUrl": "https://n8n.kratuailabs.com/webhook/" + WEBHOOK_PATH,
-                        "executionMode": "test",
-                    }
-                }
-            ]
-        },
+        # ---------------------------------------------------------------------
+        # NO pinData, deliberately.
+        #
+        # This used to carry a pinned webhook body — the exact payload that once
+        # produced "image_url is not a valid absolute URL" in n8n — so the fixture
+        # travelled with the workflow.
+        #
+        # Two reasons it is gone:
+        #
+        #  1. Pinned data on a webhook is a development convenience that changes
+        #     behaviour: n8n replays the pin instead of the real request in test
+        #     executions, which is exactly the wrong thing on a production
+        #     workflow. All three workflows were un-pinned in n8n; emitting pinData
+        #     here would re-pin this one on the next import and quietly undo that.
+        #  2. The v2 workflow's pinData had to be stripped once already because it
+        #     contained an operator IP address. A pinned webhook body is request
+        #     data, and request data accumulates things you did not mean to commit.
+        #
+        # The regression fixture itself is preserved — it now lives in
+        # scripts/test_pipeline.mjs as PINNED_REGRESSION_BODY, which is where a
+        # test fixture belongs, and where it is exercised on every run rather than
+        # only when someone opens n8n.
+        # ---------------------------------------------------------------------
         "meta": {"templateCredsSetupCompleted": True},
         "tags": [],
     }
