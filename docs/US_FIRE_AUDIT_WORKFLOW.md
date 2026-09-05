@@ -632,7 +632,14 @@ does.
 - **`code_reference` strings are model-generated** — plausible but unverified
   clause numbers. Pointers for a reviewer, not authority. This is precisely why
   11.1 matters.
-- **No rate limiting** on `/api/upload` or `/api/audit`.
+- **No rate limiting** on `/api/upload` or `/api/audit`. Header Auth means a stranger
+  cannot spend model credits, so the exposure is a leaked key or a runaway client
+  rather than an open door — but it is the only unmetered spend path in the system.
+- **Tenant scoping is incomplete.** `org_id` exists on `field_audit_us_logs`
+  (migration 009) but nothing populates it, and the Records query still filters on
+  caller-supplied `site_id`. See [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §17.4 — the
+  system is **not safe for two customers** until authentication resolves an
+  organisation and every read filters on it.
 - **Vercel Blob URLs are public and permanent.** Fine for a demo; a client should
   use their own bucket. The SSRF allow-list already accepts S3, R2, Azure and GCS,
   and presigned URLs pass, so no code change is needed.
