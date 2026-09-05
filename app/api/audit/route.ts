@@ -123,12 +123,45 @@ export async function POST(request: Request) {
 
   const siteId = typeof body.site_id === 'string' ? body.site_id.trim() : '';
 
+  // An audit has to be attached to a building to be worth anything: an
+  // unattached row cannot be retrieved by Records, billed, or included in a
+  // half-yearly Form B pack, and it costs a paid vision call to produce.
+  //
+  // This used to substitute 'UNKNOWN-SITE' for an empty value. That silently
+  // manufactured a building that does not exist, and — because the substitution
+  // happened here, upstream of the workflow — it also meant a validation rule in
+  // n8n could never see the omission. Rejecting here keeps the proxy honest about
+  // what it forwards; VALIDATE_Input rejects the same case independently, for
+  // callers that reach the webhook directly.
+  //
+  // The dashboard cannot trigger this: audit-console.tsx disables submission
+  // until a site id is entered. It is reachable only by a direct API caller.
+  //
+  // This applies to BOTH regions, deliberately, because this route is one proxy
+  // serving both and region-conditional validation here would be harder to reason
+  // about than the rule it enforced. An unattached audit is equally useless in
+  // either region. Note the consequence for the US side: 01_validate_input.js
+  // still defaults site_id to 'UNKNOWN-SITE' internally, which is now unreachable
+  // through this proxy. That default should be removed when the US workflow gets
+  // the same treatment (US §11.x); it is left in place here so this change does
+  // not edit a workflow it is not re-importing.
+  if (!siteId) {
+    return NextResponse.json(
+      {
+        status: 'REJECTED',
+        error_code: 'SITE_ID_MISSING',
+        error: '"site_id" is required.',
+      },
+      { status: 400 },
+    );
+  }
+
   // ------------------------------------------------------- upstream payload
   // Built per region rather than forwarded wholesale, so the India workflow
-  // receives exactly the two fields its PARSE_Input reads and nothing new.
+  // receives exactly the fields its VALIDATE_Input reads and nothing new.
   const payload: Record<string, unknown> = {
     image_url: imageUrl,
-    site_id: siteId || 'UNKNOWN-SITE',
+    site_id: siteId,
   };
 
   if (regionDef.fields.includes('jurisdiction')) {

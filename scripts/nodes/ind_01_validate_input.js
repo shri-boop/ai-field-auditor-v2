@@ -1,5 +1,5 @@
 /**
- * INDIA NODE 1 — PARSE_Input  (validate + normalise)
+ * INDIA NODE 1 — VALIDATE_Input
  * Mode: Run Once for All Items
  *
  * Responsibilities:
@@ -12,14 +12,21 @@
  * implementation, scripts/nodes/01_validate_input.js.
  *
  * ---------------------------------------------------------------------------
- * WHY THE NODE IS STILL CALLED PARSE_Input
+ * THE NAME
  * ---------------------------------------------------------------------------
- * Its job grew from "normalise the body" to "validate, then normalise", but two
- * downstream nodes reach back for it by name — `$('PARSE_Input')` in
- * ind_02_build_payload.js and ind_03_derive_verdict.js. Renaming the node would
- * break both references and discard the node's execution history in n8n, so the
- * name stays and the filename carries the new meaning. PARSE_Response did the
- * same when it changed from transcribing a verdict to deriving one.
+ * This was PARSE_Input until its job grew from "normalise the body" to "validate,
+ * then normalise". A node that enforces an input-validation boundary should say
+ * so: "where is untrusted input validated?" is a question a security review will
+ * ask, and a node called PARSE_Input is the wrong shape of answer. It also matches
+ * the US workflow, which has always called this VALIDATE_Input.
+ *
+ * Two Code nodes reach back for it as `$('VALIDATE_Input')` —
+ * ind_02_build_payload.js and ind_03_derive_verdict.js — so the name is a runtime
+ * contract, not a label. Renaming it in the n8n UI alone would leave the live
+ * workflow on one name and this repository's JavaScript on the other, and the next
+ * re-import would reintroduce a reference to a node that no longer exists. The
+ * rename therefore lives in patch_india_workflow.py (RENAMES), and
+ * test_india.mjs asserts that every `$('...')` reference resolves to a real node.
  *
  * ---------------------------------------------------------------------------
  * WHY THERE IS NO `new URL(...)` HERE
@@ -126,7 +133,7 @@ const hostAllowed = ALLOWED_IMAGE_HOSTS.some(function (entry) {
 if (!hostAllowed) {
   return reject(
     'IMAGE_HOST_NOT_ALLOWED',
-    'Image host is not allow-listed: ' + host + '. Add it to ALLOWED_IMAGE_HOSTS in PARSE_Input if this is intentional.',
+    'Image host is not allow-listed: ' + host + '. Add it to ALLOWED_IMAGE_HOSTS in VALIDATE_Input if this is intentional.',
     image_url
   );
 }
@@ -150,11 +157,35 @@ function clean(value, fallback, maxLength) {
   return (out || fallback).slice(0, maxLength || 64);
 }
 
-// site_id is NOT upper-cased and its fallback is lower-case 'unknown', unlike the
-// US node. That difference is deliberate: every India row already written carries
-// this normalisation, and changing it now would split the history of a site
-// across two spellings of its own id.
-const site_id = clean(body.site_id, 'unknown', 64);
+// ---------------------------------------------------------------------------
+// site_id IS REQUIRED, AND IS NORMALISED
+// ---------------------------------------------------------------------------
+// It used to default to the string 'unknown' and was stored exactly as sent.
+// Both halves of that were wrong for this product.
+//
+// Not normalising splits a building's history. The Records query matches exactly
+// (`WHERE site_id = $1`), so 'site-mum-401' and 'SITE-MUM-401' are two different
+// buildings. A technician who varies the case between visits produces two partial
+// histories, which a customer experiences not as a data-entry nuance but as "your
+// system lost my audits". It also breaks Form B before it is built: a half-yearly
+// pack is per-building, and a pack assembled from one of two split histories is
+// incomplete in a statutory filing.
+//
+// Defaulting is worse. An audit filed against 'unknown' cannot be found, cannot be
+// billed and cannot go into a Form B pack — it consumed a paid vision call to
+// produce a record nobody can use. Before 7.5 there was no way to refuse it; there
+// is now, so it is refused.
+const site_id_raw = String(body.site_id === undefined || body.site_id === null ? '' : body.site_id).trim();
+if (!site_id_raw) {
+  return reject(
+    'SITE_ID_MISSING',
+    '"site_id" is required. An audit that is not attached to a site cannot be retrieved, billed, or included in a Form B pack.',
+    body.site_id
+  );
+}
+
+// upper + trim, matching the US node, so the two regions agree on what one site is.
+const site_id = site_id_raw.toUpperCase().slice(0, 64);
 
 return [{
   json: {

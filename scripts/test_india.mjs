@@ -67,19 +67,19 @@ function runPipeline(body, modelContent, opts = {}) {
   const env = opts.env || {};
 
   bag.Webhook = [{ json: { body } }];
-  bag.PARSE_Input = N.parseInput(items(bag.Webhook), ref, env);
+  bag.VALIDATE_Input = N.parseInput(items(bag.Webhook), ref, env);
 
   // Mirrors ROUTE_Validation: a rejected request short-circuits to HTTP 400 via
   // RESPOND_BadRequest and never reaches the vision model. (Roadmap 7.5)
-  if (bag.PARSE_Input[0].json.validation_ok !== true) {
+  if (bag.VALIDATE_Input[0].json.validation_ok !== true) {
     return {
-      rejected: bag.PARSE_Input[0].json,
-      input: bag.PARSE_Input[0].json,
+      rejected: bag.VALIDATE_Input[0].json,
+      input: bag.VALIDATE_Input[0].json,
       modelWasCalled: false
     };
   }
 
-  bag.BUILD_Vision_Payload = N.payload(items(bag.PARSE_Input), ref, env);
+  bag.BUILD_Vision_Payload = N.payload(items(bag.VALIDATE_Input), ref, env);
 
   // Mock the OpenRouter chat-completions envelope.
   bag.Claude_Vision_API = [{
@@ -108,7 +108,7 @@ function runPipeline(body, modelContent, opts = {}) {
     : null;
 
   return {
-    input: bag.PARSE_Input[0].json,
+    input: bag.VALIDATE_Input[0].json,
     payload: bag.BUILD_Vision_Payload[0].json,
     derived: bag.PARSE_Response[0].json,
     response: shaped,
@@ -181,7 +181,7 @@ const DEF_MINOR = {
 };
 
 // ===========================================================================
-section('1. PARSE_Input');
+section('1. VALIDATE_Input');
 {
   const r = runPipeline(BODY, reply([]));
   check('normalises the request body', r.input.image_url === BODY.image_url &&
@@ -189,8 +189,8 @@ section('1. PARSE_Input');
   check('carries asset_tag through', r.input.asset_tag === 'EXT-401-02');
   check('carries inspector_id through', r.input.inspector_id === 'TECH-8891');
 
-  const bare = runPipeline({ image_url: BODY.image_url }, reply([]));
-  check('site_id defaults rather than throwing', bare.input.site_id === 'unknown');
+  // Only image_url and site_id are required; the rest still default.
+  const bare = runPipeline({ image_url: BODY.image_url, site_id: BODY.site_id }, reply([]));
   check('absent asset_tag becomes null, not an empty string', bare.input.asset_tag === null);
   check('absent inspector_id becomes UNASSIGNED', bare.input.inspector_id === 'UNASSIGNED');
 
@@ -319,6 +319,40 @@ section('1b. Structured HTTP 400 instead of throwing (roadmap 7.5)');
 }
 
 // ===========================================================================
+section('1c. site_id is required and normalised');
+{
+  // The Records query matches exactly (WHERE site_id = $1), so two spellings of
+  // one building are two buildings, and a Form B pack assembled from one of them
+  // is incomplete.
+  check('site_id is upper-cased so one building is one string',
+    runPipeline({ ...BODY, site_id: 'site-mum-401' }, reply([])).input.site_id === 'SITE-MUM-401',
+    runPipeline({ ...BODY, site_id: 'site-mum-401' }, reply([])).input.site_id);
+  check('mixed case normalises to the same value as upper case',
+    runPipeline({ ...BODY, site_id: 'Site-Mum-401' }, reply([])).input.site_id ===
+    runPipeline({ ...BODY, site_id: 'SITE-MUM-401' }, reply([])).input.site_id);
+  check('surrounding whitespace does not create a second building',
+    runPipeline({ ...BODY, site_id: '  SITE-MUM-401  ' }, reply([])).input.site_id === 'SITE-MUM-401');
+  check('an over-long site_id is truncated to the column width, not rejected',
+    runPipeline({ ...BODY, site_id: 'S'.repeat(200) }, reply([])).input.site_id.length === 64);
+
+  // An audit not attached to a building cannot be retrieved, billed, or filed.
+  // Before 7.5 there was no way to refuse it; there is now.
+  const missing = runPipeline({ image_url: BODY.image_url }, reply([])).rejected;
+  check('a missing site_id is rejected, not defaulted to a fake building',
+    missing && missing.validation_error_code === 'SITE_ID_MISSING',
+    missing && missing.validation_error_code);
+  check('a whitespace-only site_id is rejected too',
+    runPipeline({ ...BODY, site_id: '   ' }, reply([])).rejected.validation_error_code === 'SITE_ID_MISSING');
+  check('a rejected site_id never reaches the vision model',
+    runPipeline({ image_url: BODY.image_url }, reply([])).modelWasCalled === false);
+  check('no audit is ever filed against the old placeholder',
+    /unknown/i.test(runPipeline(BODY, reply([])).input.site_id) === false);
+  // The reason has to explain the consequence, or it reads as pedantry.
+  check('the rejection explains why a site is required',
+    /retriev|bill|Form B/i.test(missing.validation_error), missing.validation_error);
+}
+
+// ===========================================================================
 section('2. BUILD_Vision_Payload — the prompt');
 {
   const p = runPipeline(BODY, reply([])).payload;
@@ -350,7 +384,7 @@ section('2. BUILD_Vision_Payload — the prompt');
   check('the asset tag reaches the prompt when supplied',
     /ASSET TAG \(claimed\): EXT-401-02/.test(prompt));
   check('no empty asset-tag line when absent',
-    !/ASSET TAG/.test(runPipeline({ image_url: BODY.image_url }, reply([]))
+    !/ASSET TAG/.test(runPipeline({ image_url: BODY.image_url, site_id: BODY.site_id }, reply([]))
       .payload.payload.messages[0].content[1].text));
 
   check('checklist_severity is exported for the parser to validate against',
@@ -735,9 +769,9 @@ section('9. AI_Field_Audit_v2.json wiring');
   // ---------------------------------------------------- roadmap 7.5 wiring
   check('ROUTE_Validation exists', by.ROUTE_Validation !== undefined);
   check('RESPOND_BadRequest exists', by.RESPOND_BadRequest !== undefined);
-  check('the chain is PARSE_Input -> ROUTE_Validation',
-    wf.connections.PARSE_Input.main[0][0].node === 'ROUTE_Validation',
-    JSON.stringify(wf.connections.PARSE_Input));
+  check('the chain is VALIDATE_Input -> ROUTE_Validation',
+    wf.connections.VALIDATE_Input?.main?.[0]?.[0]?.node === 'ROUTE_Validation',
+    JSON.stringify(wf.connections.VALIDATE_Input));
   check('ROUTE_Validation routes valid input to BUILD_Vision_Payload on output 0',
     wf.connections.ROUTE_Validation.main[0][0].node === 'BUILD_Vision_Payload');
   check('ROUTE_Validation routes a rejection to RESPOND_BadRequest on output 1',
@@ -752,8 +786,74 @@ section('9. AI_Field_Audit_v2.json wiring');
     by.RESPOND_BadRequest.parameters.responseBody.indexOf('validation_error_code') !== -1 &&
     by.RESPOND_BadRequest.parameters.responseBody.indexOf('validation_error') !== -1);
   // The gate must sit before the paid call, or it saves nothing.
-  check('nothing routes PARSE_Input straight to BUILD_Vision_Payload any more',
-    JSON.stringify(wf.connections.PARSE_Input).indexOf('BUILD_Vision_Payload') === -1);
+  check('nothing routes VALIDATE_Input straight to BUILD_Vision_Payload any more',
+    JSON.stringify(wf.connections.VALIDATE_Input ?? {}).indexOf('BUILD_Vision_Payload') === -1);
+
+  // ------------------------------------------------- the rename, and the guard
+  check('the validator node is called VALIDATE_Input, naming the boundary it enforces',
+    by.VALIDATE_Input !== undefined && by.PARSE_Input === undefined,
+    Object.keys(by).filter(function (n) { return /PARSE_Input|VALIDATE_Input/.test(n); }).join(','));
+  // The rename must keep the node's id: a new id would read to n8n as "delete
+  // that node, add a different one" and drop its execution history for nothing.
+  check('the rename preserved a stable node id',
+    typeof by.VALIDATE_Input?.id === 'string' && by.VALIDATE_Input.id.length > 0,
+    by.VALIDATE_Input?.id);
+  check('the Webhook feeds VALIDATE_Input, not a node that no longer exists',
+    wf.connections.Webhook?.main?.[0]?.[0]?.node === 'VALIDATE_Input',
+    wf.connections.Webhook?.main?.[0]?.[0]?.node);
+
+  // THE GUARD. A node renamed in the n8n UI but not here would leave the
+  // committed JavaScript referencing a node that does not exist — and the failure
+  // would only appear on the happy path, because the rejection path
+  // short-circuits before BUILD_Vision_Payload ever runs. Cross-check every
+  // $('...') reference in every Code node against the actual node names.
+  {
+    const nodeNames = new Set(wf.nodes.map(function (n) { return n.name; }));
+    const REF_RE = /\$\(\s*'([^']+)'\s*\)/g;
+
+    // Documentation legitimately writes $('...') when describing the mechanism, so
+    // comments are stripped before scanning. Only whole-line and block comments are
+    // removed, never a trailing // inside a line, which would truncate URLs.
+    function stripComments(src) {
+      return src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .filter(function (line) {
+          const t = line.trim();
+          return t.startsWith('//') === false && t.startsWith('*') === false;
+        })
+        .join('\n');
+    }
+
+    const referenced = [];
+    wf.nodes.forEach(function (n) {
+      const params = n.parameters || {};
+      Object.keys(params).forEach(function (key) {
+        const value = params[key];
+        if (typeof value !== 'string') return;
+        // jsCode is JavaScript; everything else is an n8n expression, where a
+        // $('Node') reference is just as load-bearing (Vision_Fallback's body
+        // reaches for BUILD_Vision_Payload this way).
+        const haystack = key === 'jsCode' ? stripComments(value) : value;
+        let m;
+        REF_RE.lastIndex = 0;
+        while ((m = REF_RE.exec(haystack)) !== null) {
+          referenced.push({ from: n.name, via: key, to: m[1] });
+        }
+      });
+    });
+
+    check('the reference guard actually found cross-node references',
+      referenced.length >= 3, String(referenced.length));
+    check('the guard sees the fallback reaching for the rendered payload',
+      referenced.some(function (r) {
+        return r.from === 'Vision_Fallback' && r.to === 'BUILD_Vision_Payload';
+      }));
+    const dangling = referenced.filter(function (r) { return !nodeNames.has(r.to); });
+    check('every $(\'node\') reference resolves to a node that exists',
+      dangling.length === 0,
+      dangling.map(function (d) { return d.from + '.' + d.via + " -> $('" + d.to + "')"; }).join(', '));
+  }
 
   // ---------------------------------------------------- roadmap 7.6 wiring
   check('Claude_Vision_API has a timeout, so a hung provider cannot hold the run open',
@@ -815,7 +915,7 @@ section('9. AI_Field_Audit_v2.json wiring');
   // The workflow JSON must match the files this harness tested, or the tests
   // prove nothing about what actually runs.
   const fileOf = {
-    PARSE_Input: 'ind_01_validate_input.js',
+    VALIDATE_Input: 'ind_01_validate_input.js',
     BUILD_Vision_Payload: 'ind_02_build_payload.js',
     PARSE_Response: 'ind_03_derive_verdict.js',
     SHAPE_Response: 'ind_04_shape_response.js',
@@ -824,8 +924,10 @@ section('9. AI_Field_Audit_v2.json wiring');
   Object.keys(fileOf).forEach(function (nodeName) {
     const onDisk = readFileSync(join(NODES, fileOf[nodeName]), 'utf8');
     check(nodeName + ' in the JSON matches scripts/nodes/' + fileOf[nodeName],
-      by[nodeName].parameters.jsCode === onDisk,
-      'run: python3 scripts/patch_india_workflow.py');
+      by[nodeName]?.parameters?.jsCode === onDisk,
+      by[nodeName] === undefined
+        ? 'no node named ' + nodeName + ' in the workflow'
+        : 'run: python3 scripts/patch_india_workflow.py');
   });
 }
 

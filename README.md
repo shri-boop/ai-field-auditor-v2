@@ -25,7 +25,7 @@ writes those into the JSON. **Never hand-edit the JSON.**
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 215 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 229 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
@@ -42,7 +42,7 @@ Things to know before re-importing it into n8n:
   active after the import.
 - `DOWNLOAD_Image → EXTRACT_Base64` is an orphaned pair, left over from an earlier
   base64 approach. It is not in the executing chain
-  (`Webhook → PARSE_Input → ROUTE_Validation → BUILD_Vision_Payload →
+  (`Webhook → VALIDATE_Input → ROUTE_Validation → BUILD_Vision_Payload →
   Claude_Vision_API → PARSE_Response → LOG_Audit → SHAPE_Response →
   IF_NonCompliant`) and is left alone deliberately.
 

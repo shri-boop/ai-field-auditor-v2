@@ -31,7 +31,7 @@
  * cost asymmetry between a false alarm and a missed blocked exit is not close.
  */
 
-const source = $('PARSE_Input').first().json;
+const source = $('VALIDATE_Input').first().json;
 const payloadMeta = $('BUILD_Vision_Payload').first().json;
 const audit_timestamp = new Date().toISOString();
 

@@ -15,7 +15,7 @@ the offline test harness (scripts/test_india.mjs). The US workflow does the same
 CHAIN AFTER PATCHING
 --------------------
     Webhook
-      -> PARSE_Input            ind_01_validate_input.js   SSRF guard, never throws
+      -> VALIDATE_Input         ind_01_validate_input.js   SSRF guard, never throws
       -> ROUTE_Validation       NEW NODE, on validation_ok
            |- 0 valid
            `- 1 rejected -> RESPOND_BadRequest   NEW NODE, HTTP 400 with a reason
@@ -47,12 +47,12 @@ WHAT CHANGED AND WHY (roadmap 7.1 / 7.2 / 7.3 in docs/IND_FIRE_AUDIT_WORKFLOW.md
      now continues and reports persisted: false, which the dashboard already
      renders and the alert body states outright.
 
-7.4  PARSE_Input restricts image_url to https on an allow-listed object-store
+7.4  VALIDATE_Input restricts image_url to https on an allow-listed object-store
      host, with no userinfo, no IP literals and no private ranges. The URL is
      caller-controlled and OpenRouter dereferences it, which made the audit
      webhook a request-forgery primitive pointed at whatever the caller named.
 
-7.5  ROUTE_Validation + RESPOND_BadRequest. PARSE_Input no longer throws, so a
+7.5  ROUTE_Validation + RESPOND_BadRequest. VALIDATE_Input no longer throws, so a
      malformed request gets HTTP 400 and a reason instead of a 500 with an empty
      body, and never reaches the paid vision call.
 
@@ -94,10 +94,31 @@ WORKFLOW_NAME = "AI_Field_Audit_V2"
 # from transcribing the model's verdict to deriving one: renaming it would break
 # every $('PARSE_Response') reference and the node's own execution history.
 JS_NODES = {
-    "PARSE_Input": "ind_01_validate_input.js",
+    "VALIDATE_Input": "ind_01_validate_input.js",
     "BUILD_Vision_Payload": "ind_02_build_payload.js",
     "PARSE_Response": "ind_03_derive_verdict.js",
     "NOTIFY_OpsManager": "ind_05_build_alert.js",
+}
+
+# ---------------------------------------------------------------- node renames
+# old name -> new name. Applied before anything else looks the nodes up.
+#
+# PARSE_Input became VALIDATE_Input in 7.4/7.5: the node stopped merely
+# normalising the body and became the workflow's input-validation boundary. A node
+# that enforces a security control should say so — "where is untrusted input
+# validated?" is a question a buyer's security review will ask, and "a node called
+# PARSE_Input" is the wrong shape of answer. It also brings India into line with
+# the US workflow, which has always called it VALIDATE_Input.
+#
+# The rename is done HERE, mechanically, rather than by hand in the n8n UI,
+# because two Code nodes reach back for it as $('...') and those references live
+# in scripts/nodes/*.js. Renaming in the UI alone splits the two: the live
+# workflow gets one name and the committed JavaScript keeps the other, and the
+# next re-import silently reintroduces a reference to a node that no longer
+# exists. test_india.mjs now asserts every $('...') reference resolves to a real
+# node, so that divergence cannot ship again.
+RENAMES = {
+    "PARSE_Input": "VALIDATE_Input",
 }
 
 SHAPE_NODE_NAME = "SHAPE_Response"
@@ -296,11 +317,45 @@ def ensure_shape_node(wf, by_name):
     }
 
 
+def apply_renames(wf):
+    """
+    Rename nodes in place, preserving each node's id, and repoint every
+    connection that names them.
+
+    Preserving the id matters: n8n keys a node's identity off it, so a rename that
+    also changed the id would read as "delete this node, add a different one" and
+    discard its execution history for no reason.
+    """
+    renamed = []
+    for node in wf["nodes"]:
+        new_name = RENAMES.get(node["name"])
+        if new_name:
+            node["name"] = new_name
+            renamed.append(new_name)
+
+    if not renamed:
+        return renamed
+
+    # Connection dict keys are source node names.
+    for old_name, new_name in RENAMES.items():
+        if old_name in wf["connections"]:
+            wf["connections"][new_name] = wf["connections"].pop(old_name)
+
+    # Connection targets name nodes too.
+    for outputs in wf["connections"].values():
+        for branch in outputs.get("main", []):
+            for conn in branch or []:
+                if conn.get("node") in RENAMES:
+                    conn["node"] = RENAMES[conn["node"]]
+
+    return renamed
+
+
 def ensure_validation_nodes(wf, by_name):
     """
-    Roadmap 7.5 — insert ROUTE_Validation + RESPOND_BadRequest after PARSE_Input.
+    Roadmap 7.5 — insert ROUTE_Validation + RESPOND_BadRequest after VALIDATE_Input.
 
-    PARSE_Input used to throw on bad input. A throw aborts the execution before
+    VALIDATE_Input used to throw on bad input. A throw aborts the execution before
     Respond_to_Webhook1 runs, so the caller got HTTP 500 and an empty body and
     could not tell "I sent you a bad URL" from "your workflow is broken". It now
     emits validation_ok and this pair turns a false into a real 400.
@@ -309,7 +364,7 @@ def ensure_validation_nodes(wf, by_name):
     never reaches Claude_Vision_API, so malformed input costs nothing. Every audit
     is a metered vision call.
     """
-    parse_pos = by_name["PARSE_Input"]["position"]
+    parse_pos = by_name["VALIDATE_Input"]["position"]
 
     if ROUTE_NODE_NAME not in by_name:
         wf["nodes"].append({
@@ -353,9 +408,9 @@ def ensure_validation_nodes(wf, by_name):
     else:
         by_name[RESPOND_400_NAME]["parameters"]["options"]["responseCode"] = 400
 
-    # Rewire: PARSE_Input -> ROUTE_Validation -> {0: BUILD_Vision_Payload,
+    # Rewire: VALIDATE_Input -> ROUTE_Validation -> {0: BUILD_Vision_Payload,
     # 1: RESPOND_BadRequest}.
-    wf["connections"]["PARSE_Input"] = {
+    wf["connections"]["VALIDATE_Input"] = {
         "main": [[{"node": ROUTE_NODE_NAME, "type": "main", "index": 0}]]
     }
     wf["connections"][ROUTE_NODE_NAME] = {
@@ -450,6 +505,9 @@ def main():
         original = fh.read()
     wf = json.loads(original)
 
+    # Before anything looks a node up by name.
+    renamed = apply_renames(wf)
+
     by_name = {n["name"]: n for n in wf["nodes"]}
 
     required = list(JS_NODES) + ["LOG_Audit", "IF_NonCompliant", "Respond_to_Webhook1"]
@@ -504,6 +562,8 @@ def main():
 
     print("Patched " + os.path.relpath(PATH, REPO))
     print("  workflow name: " + WORKFLOW_NAME)
+    if renamed:
+        print("  renamed node(s): " + ", ".join(renamed))
     print("  nodes with JS from scripts/nodes/: "
           + ", ".join(sorted(list(JS_NODES) + [SHAPE_NODE_NAME])))
     print("  LOG_Audit columns: " + str(len(COLUMNS))
@@ -515,11 +575,17 @@ def main():
            + "ms, maxTries=3, falls back to " + FALLBACK_MODEL + " (7.6)")
     print()
     print("NEXT, IN THIS ORDER:")
-    print("  1. No DB migration is needed for this change - no new columns.")
+    print("  1. Apply scripts/db/005_field_audit_logs_site_id.sql")
+    print("     (normalises site_id; expected to report 0 rows changed)")
     print("  2. Re-import this file into n8n, UPDATING the existing workflow")
     print("     (a second copy would fight over /webhook/audit-field-photov2)")
-    print("  3. This adds 3 nodes and re-wires 3 connections, so confirm on the")
-    print("     canvas: PARSE_Input -> ROUTE_Validation -> {BUILD_Vision_Payload,")
+    print("  3. Confirm the validator node reads VALIDATE_Input on the canvas.")
+    print("     Do NOT rename nodes in the n8n UI: two Code nodes reach for it")
+    print("     as $('VALIDATE_Input'), and a UI-only rename breaks the happy")
+    print("     path while leaving the reject path working, so a 400 smoke test")
+    print("     will not catch it. Rename via RENAMES in this script instead.")
+    print("  4. This adds 3 nodes and re-wires 3 connections, so confirm on the")
+    print("     canvas: VALIDATE_Input -> ROUTE_Validation -> {BUILD_Vision_Payload,")
     print("     RESPOND_BadRequest} and Claude_Vision_API error output ->")
     print("     " + FALLBACK_NODE_NAME + " -> PARSE_Response.")
     return 0
