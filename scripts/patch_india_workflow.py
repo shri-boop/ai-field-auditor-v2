@@ -77,6 +77,19 @@ NODES = os.path.join(REPO, "scripts", "nodes")
 
 TABLE = "field_audit_logs"
 
+# The workflow's own name, as it now reads in the n8n UI.
+#
+# It was "AI_Field_Audit_V2_URL_To_Base64" — a leftover from the abandoned approach
+# that downloaded the image and base64-encoded it, which survives in this workflow
+# only as the disabled DOWNLOAD_Image -> EXTRACT_Base64 pair. The name outlived the
+# design by long enough to be actively misleading: it described a data path the
+# workflow no longer takes.
+#
+# Set here rather than left to the UI because an import carries `name` with it. A
+# stale name in this artifact would silently rename the live workflow back on every
+# re-import, which is how it would have crept back the next time anyone deployed.
+WORKFLOW_NAME = "AI_Field_Audit_V2"
+
 # name -> source file. PARSE_Response keeps its name although its job changed
 # from transcribing the model's verdict to deriving one: renaming it would break
 # every $('PARSE_Response') reference and the node's own execution history.
@@ -459,6 +472,8 @@ def main():
         print("FAIL: Webhook path changed: " + str(path))
         return 1
 
+    wf["name"] = WORKFLOW_NAME
+
     patch_webhook_auth(by_name["Webhook"])
 
     for node_name, filename in JS_NODES.items():
@@ -488,6 +503,7 @@ def main():
         fh.write(rendered)
 
     print("Patched " + os.path.relpath(PATH, REPO))
+    print("  workflow name: " + WORKFLOW_NAME)
     print("  nodes with JS from scripts/nodes/: "
           + ", ".join(sorted(list(JS_NODES) + [SHAPE_NODE_NAME])))
     print("  LOG_Audit columns: " + str(len(COLUMNS))

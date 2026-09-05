@@ -25,7 +25,7 @@ writes those into the JSON. **Never hand-edit the JSON.**
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 213 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 215 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and

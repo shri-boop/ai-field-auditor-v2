@@ -710,6 +710,14 @@ section('9. AI_Field_Audit_v2.json wiring');
     by.LOG_Audit.parameters.table.value === 'field_audit_logs');
   check('the workflow still ships active: true, matching production', wf.active === true);
 
+  // An import carries `name`, so a stale name here silently renames the live
+  // workflow on every re-import. The old name described the abandoned
+  // download-and-base64 path, which survives only as the disabled node pair.
+  check('the workflow name matches the n8n UI and does not describe a dead data path',
+    wf.name === 'AI_Field_Audit_V2', wf.name);
+  check('the abandoned base64 approach is not named in the workflow title',
+    /base64/i.test(wf.name) === false, wf.name);
+
   check('LOG_Audit tolerates failure instead of aborting the run',
     by.LOG_Audit.onError === 'continueRegularOutput');
   check('LOG_Audit always outputs data, so SHAPE_Response still runs on failure',
