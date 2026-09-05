@@ -442,6 +442,24 @@ flat human-readable line, kept for continuity with every row written before it.
   the weaker fact rather than blending it in. Unlike migration 003's `image_url`,
   backfilling is legitimate here because an identifier is derivable from data the row
   already holds — nothing evidentiary is invented.
+- `007_field_audit_signoffs.sql` — creates the append-only `field_audit_signoffs`
+  history table shared by both regions, and gives India the `signoff_status` /
+  `signoff_by` / `signoff_at` / `signoff_notes` columns the US table has carried
+  since 001, with the same CHECK.
+
+  Also adds `record_signoff()`, the only sanctioned write path: it performs the
+  history insert and the audit-row update in one call so they cannot half-commit,
+  and enforces the permitted transitions, the role rules, the bulk restrictions and
+  the credential-expiry gates server-side. **Do not insert into
+  `field_audit_signoffs` directly.**
+
+  ⚠️ **This migration's SQL was not executed before it was committed** — no
+  Postgres was available in the environment it was written in. Run
+  `scripts/db/007_verify.sql` after applying it: it exercises every rule on the real
+  engine and prints PASS/FAIL, inside a transaction it rolls back. See
+  [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §16.
+
+  No workflow re-import is needed — nothing in n8n writes these columns yet.
 
 All are fully guarded: they verify the table and each column first and skip
 cleanly, because that table's shape cannot be proved from source control. All are
@@ -786,9 +804,14 @@ verdict in code from severities that are persisted alongside it, so the stored s
 is reproducible from the stored evidence — you can audit the audit. A signature can
 mean something here.
 
-What still stands between here and Form B support: sign-off columns on
-`field_audit_logs`, a write path, and the credential model for a **Licensed Agency**
-rather than an individual permit-holder.
+What still stands between here and Form B support has narrowed to two items. The
+sign-off columns on `field_audit_logs` now exist (migration 007), as does the write
+path — `record_signoff()`, atomic and transition-enforcing, shared with the US
+region. What remains is the **Licensed Agency** credential model populated for real
+(`IN-MH` is a flagged stub in `lib/credential-registry.mjs`, and the prescribed Form
+B wording has not been obtained from a primary source), and the
+`compliance_periods` entity that turns a half-year of audits into one Form B
+evidence pack — [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §14.4.
 
 Two of those are now specified rather than open — see
 [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §14, which reviewed the US design against this
@@ -877,6 +900,8 @@ These are not India-specific — see the US document for detail:
 | Node-name reference drift | ✅ every `$('node')` reference asserted to resolve, in Code nodes and expressions |
 | `audit_timestamp` column type | ✅ `timestamptz` (migration 006) — Form B date ranges now possible |
 | Minted `audit_id` | ✅ `FA-IN-…` minted in `VALIDATE_Input`; historical rows backfilled `FA-INB-…` (006) |
+| Sign-off columns + write path | ✅ `field_audit_signoffs`, append-only, with atomic `record_signoff()` (007) |
+| Form B evidence pack | ❌ needs `compliance_periods` + confirmed `IN-MH` registry + prescribed wording (7.9) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored

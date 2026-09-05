@@ -228,25 +228,66 @@ year of records signed under a lapsed certificate.
 Two things must both be true: nothing is silently overwritten, and mistakes can be
 corrected. That means a history table, not mutable columns.
 
-**New table `field_audit_signoffs`** — one row per action, never updated:
+**New table `field_audit_signoffs`** — one row per action, never updated.
+
+✅ **Built in migration 007.** The shipped schema, which differs from the sketch
+this section originally carried in three ways — each explained below it:
 
 ```
-id              bigserial PK
-audit_id        text        -- FK to field_audit_us_logs.audit_id
-action          text        -- CONFIRMED | REJECTED | SUPERSEDED
-signoff_kind    text        -- DESK_REVIEW | FIELD_VERIFIED
-actor_name      text        -- snapshot
-actor_email     text        -- snapshot
-credential_type text        -- snapshot
-credential_no   text        -- snapshot
-credential_expiry date      -- snapshot: what it was AT SIGNING
-company_licence text        -- snapshot
-attestation     text        -- the verbatim wording agreed to
-reason_code     text        -- rejections only, see §7
-notes           text
-superseded_by   bigint      -- self-reference
-created_at      timestamptz DEFAULT now()
+id                          bigserial PK
+region                      text   -- US | IND        ◀ added
+audit_id                    text   -- no FK possible  ◀ changed
+action                      text   -- CONFIRMED | REJECTED | SUPERSEDED
+signoff_kind                text   -- DESK_REVIEW | FIELD_VERIFIED
+audit_jurisdiction          text   -- §4: what the audit was judged against
+eligibility_reason          text   -- §4: WHY this kind, not just which
+signing_authority           text   -- §14.2: INDIVIDUAL | FIRM
+actor_account_id            text   -- snapshot
+actor_name                  text   -- snapshot
+actor_email                 text   -- snapshot
+actor_role                  text   -- snapshot
+credential_jurisdiction     text   -- snapshot
+credential_type             text   -- snapshot
+credential_no               text   -- snapshot
+credential_expiry           date   -- snapshot: what it was AT SIGNING
+credential_expiry_semantics text   -- §14.3: EXPIRES | PERPETUAL | UNKNOWN
+verification_method         text   -- §15: the substituted control, snapshotted
+verified_by_name            text   -- §15
+verified_at                 timestamptz
+verification_review_due_at  timestamptz
+firm_name                   text   -- §14.2
+firm_licence_no             text   -- §14.2
+firm_licence_expiry         date
+firm_licence_category       text
+attestation                 text   -- the verbatim wording agreed to
+reason_code                 text   -- rejections only, see §7
+notes                       text
+supersedes                  bigint -- points BACKWARDS               ◀ inverted
+bulk                        boolean
+created_at                  timestamptz DEFAULT now()
 ```
+
+**1. `supersedes` on the new row, not `superseded_by` on the old one.** The sketch
+had both a `superseded_by` self-reference *and* "never updated". Those cannot both
+hold — setting `superseded_by` on an existing row is an update. Inverting the
+pointer makes append-only a property of the schema rather than a promise about how
+callers behave. Current state comes from `v_signoff_current`.
+
+**2. `region`, because the foreign key is not available.** US audits live in
+`field_audit_us_logs` and India audits in `field_audit_logs`; one column cannot
+reference two tables. `record_signoff()` checks the row exists in the right table
+and refuses if it does not. Region is deliberately **not** inferred from the
+`FA-US-` / `FA-IN-` prefix — deriving integrity from a string convention is the
+kind of implicit coupling that breaks silently later.
+
+**3. `company_licence` became four firm columns.** §14.2: under
+`signing_authority = FIRM` the agency licence *is* the operative instrument, so it
+needs its own expiry and category, not a single string.
+
+Enforced in the schema rather than by convention: append-only via a trigger,
+`CONFIRMED` requires attestation wording, `REJECTED` requires a reason code,
+`FIELD_VERIFIED` requires `signing_authority`, and `FIELD_VERIFIED` can never be
+`bulk` (§8).
 
 The existing `signoff_status` / `signoff_by` / `signoff_at` columns on
 `field_audit_us_logs` stay, denormalised to the **current** state so the records
@@ -264,7 +305,14 @@ CONFIRMED → PENDING         NEVER
 ```
 
 `SUPERSEDED` already exists in the `signoff_status` CHECK constraint from migration
-001, which is the hook this design uses.
+001, which is the hook this design uses. Migration 007 gives India the same four
+columns and the same CHECK, so one query shape serves both regions.
+
+**Enforced in `record_signoff()`, not in the UI**, and enumerated positively —
+anything not on the list is refused, so a status added later fails closed instead of
+quietly becoming signable. `SUPERSEDED` is terminal: a re-audit mints a new
+`audit_id`, so there is nothing to re-sign. `CONFIRMED → CONFIRMED` is refused too;
+supersede first.
 
 **Re-auditing supersedes automatically.** A new audit of the same `asset_tag` at
 the same site should mark the prior sign-off `SUPERSEDED` rather than leaving two
@@ -367,10 +415,14 @@ table is a signature that changes when the user record changes.
 
 ### Migration order
 
-1. `CREDENTIAL_REGISTRY` — Florida verified, other states as flagged stubs. Pure
-   data, no schema, independently reviewable. **Start here:** it is the piece §3
-   and §4 depend on and the cheapest thing to get wrong now rather than later.
-2. `field_audit_signoffs` table, with the jurisdiction-scoped credential snapshot
+1. ✅ **SHIPPED** — `CREDENTIAL_REGISTRY` (`lib/credential-registry.mjs`, 80
+   offline assertions). Florida verified, `IN-MH` and every other jurisdiction as
+   flagged stubs. Pure data, no schema. `signing_authority` and `expiry_semantics`
+   present from the first commit per §14.10.
+2. ✅ **SHIPPED** — `field_audit_signoffs` (migration 007), with the
+   jurisdiction-scoped credential snapshot, the §15 verification snapshot,
+   append-only enforcement, `record_signoff()` for atomicity (§14.6), India's
+   denormalised columns, and `scripts/db/007_verify.sql` to test it on the engine.
 3. Users / credentials schema on the new database
 4. Auth.js, login, MFA — no sign-off UI yet
 5. The write workflow, exercised by curl
@@ -617,6 +669,21 @@ So the write must be a single statement: one `WITH ... AS (INSERT ...) UPDATE ..
 or a stored function called once. And it needs the §6 transition table enforced
 server-side, not just in the UI.
 
+✅ **Closed in migration 007.** `record_signoff()` performs the history INSERT and
+the audit-row UPDATE in one call and enforces §6's transitions, §10's roles, §8's
+bulk rules and §5/§15's expiry controls. The workflow at step 5 calls it once and
+passes parameters; it does not compose SQL, so it cannot get atomicity wrong.
+
+A `jsonb` snapshot parameter carries the eighteen credential, firm and verification
+fields. As positional arguments that is a signature nobody could call correctly from
+n8n, and one transposed pair of strings would mis-record who signed — but every key
+is destructured into a typed column, so storage stays strongly typed and queryable
+while the transport stays loose enough to build in a Code node.
+
+`v_signoff_expired_credential` exists to catch anything that bypasses the function
+anyway. It should always return zero rows; a non-empty result means something wrote
+to the table directly.
+
 ### 14.7 GAP — supersede-on-re-audit keys on a column India allows to be null
 
 §6: "A new audit of the same `asset_tag` at the same site should mark the prior
@@ -812,3 +879,39 @@ Deliberately **not** built: the n8n copy. It is needed at step 6, and when it is
 generate it from this file with a `--check` rather than hand-copying. A second
 hand-maintained copy of licensing data is the same class of divergence as renaming
 a node in the n8n UI.
+
+---
+
+## 16. The SQL in 007 was not run by its author
+
+Worth stating plainly, because every other decision-making component in this
+repository ships with an offline suite and this one does not.
+
+No Postgres was available in the environment migration 007 was written in — no
+`psql`, no client library, and the container registries are unreachable, so a
+throwaway instance was not an option either. Nothing about the migration was
+executed before it was committed.
+
+Two things were done about that rather than none.
+
+**`scripts/db/007_verify.sql`** exercises the migration on the real engine and
+prints PASS or FAIL per assertion: every transition in §6, the role rules in §10,
+the bulk rules in §8, the expiry and verification gates from §5 and §15, the
+append-only trigger, and the constraint-level guards. It also proves the gate
+*opens* — a valid desk review, a valid field verification, and a CRITICAL audit
+signed individually — because a suite that only tests refusals would pass just as
+happily if the feature were entirely unusable.
+
+It runs inside a transaction ending in `ROLLBACK`, uses `FA-VERIFY-` prefixed
+scratch rows, and never modifies a pre-existing row, so it is safe against
+production.
+
+**`scripts/test_signoff_sql.mjs`** (96 assertions) is the weaker guard that runs
+offline. It does *not* execute SQL and says so in its header and its final line. What
+it does is assert that the rules in the SQL still match the rules in this document
+— §7's reason codes, §15.3's method ladder, the transition list, the append-only
+trigger, the absence of a `superseded_by` column — which is the thing most likely to
+drift silently as either file changes.
+
+The distinction matters: a green `test_signoff_sql.mjs` is **not** evidence that
+sign-off works. Only `007_verify.sql` is, and it has to be run against the box.
