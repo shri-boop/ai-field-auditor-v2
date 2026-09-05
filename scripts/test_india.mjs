@@ -41,7 +41,7 @@ function loadNode(file) {
 }
 
 const N = {
-  parseInput: loadNode('ind_01_parse_input.js'),
+  parseInput: loadNode('ind_01_validate_input.js'),
   payload: loadNode('ind_02_build_payload.js'),
   derive: loadNode('ind_03_derive_verdict.js'),
   response: loadNode('ind_04_shape_response.js'),
@@ -68,6 +68,17 @@ function runPipeline(body, modelContent, opts = {}) {
 
   bag.Webhook = [{ json: { body } }];
   bag.PARSE_Input = N.parseInput(items(bag.Webhook), ref, env);
+
+  // Mirrors ROUTE_Validation: a rejected request short-circuits to HTTP 400 via
+  // RESPOND_BadRequest and never reaches the vision model. (Roadmap 7.5)
+  if (bag.PARSE_Input[0].json.validation_ok !== true) {
+    return {
+      rejected: bag.PARSE_Input[0].json,
+      input: bag.PARSE_Input[0].json,
+      modelWasCalled: false
+    };
+  }
+
   bag.BUILD_Vision_Payload = N.payload(items(bag.PARSE_Input), ref, env);
 
   // Mock the OpenRouter chat-completions envelope.
@@ -102,7 +113,8 @@ function runPipeline(body, modelContent, opts = {}) {
     derived: bag.PARSE_Response[0].json,
     response: shaped,
     alerted: alerted,
-    alert: bag.NOTIFY_OpsManager ? bag.NOTIFY_OpsManager[0].json : null
+    alert: bag.NOTIFY_OpsManager ? bag.NOTIFY_OpsManager[0].json : null,
+    modelWasCalled: true
   };
 }
 
@@ -187,11 +199,123 @@ section('1. PARSE_Input');
   check('over-long asset_tag is truncated, not rejected',
     runPipeline({ ...BODY, asset_tag: 'X'.repeat(200) }, reply([])).input.asset_tag.length === 64);
 
-  // Roadmap 7.5: this SHOULD be a structured HTTP 400. It is not yet, and the
-  // test records the current behaviour so the change is visible when it happens.
+  check('a valid request is marked validation_ok', r.input.validation_ok === true);
+  check('the allow-listed host is extracted without a URL global',
+    r.input.image_host === 'abc.public.blob.vercel-storage.com', r.input.image_host);
+}
+
+// ===========================================================================
+section('1a. SSRF hardening on image_url (roadmap 7.4, restricted sandbox)');
+{
+  // These run under the same shadowed-globals harness as everything else, so a
+  // `new URL(...)` creeping back into the validator fails here rather than in
+  // production. That is exactly how the US pipeline's ReferenceError was caught.
+  function rejectionOf(overrides) {
+    return runPipeline({ ...BODY, ...overrides }, reply([])).rejected;
+  }
+
+  const http = rejectionOf({ image_url: 'http://abc.public.blob.vercel-storage.com/x.jpg' });
+  check('rejects plain http', http && http.validation_error_code === 'IMAGE_URL_NOT_HTTPS',
+    http && http.validation_error_code);
+
+  const host = rejectionOf({ image_url: 'https://evil.example.com/x.jpg' });
+  check('rejects a non-allow-listed host',
+    host && host.validation_error_code === 'IMAGE_HOST_NOT_ALLOWED', host && host.validation_error_code);
+
+  const malformed = rejectionOf({ image_url: 'not-a-url-at-all' });
+  check('rejects a malformed URL',
+    malformed && malformed.validation_error_code === 'IMAGE_URL_MALFORMED',
+    malformed && malformed.validation_error_code);
+
+  // Allow-list bypass via userinfo: the real host is the part after the "@".
+  const userinfo = rejectionOf({ image_url: 'https://abc.public.blob.vercel-storage.com@evil.example/x.jpg' });
+  check('rejects the credentials-in-URL allow-list bypass',
+    userinfo && userinfo.validation_error_code === 'IMAGE_URL_HAS_USERINFO',
+    userinfo && userinfo.validation_error_code);
+
+  const ipv6 = rejectionOf({ image_url: 'https://[::1]/x.jpg' });
+  check('rejects an IPv6 literal host',
+    ipv6 && /IP_LITERAL|NOT_ALLOWED/.test(ipv6.validation_error_code), ipv6 && ipv6.validation_error_code);
+
+  // The metadata endpoint is the payload that makes SSRF worth having: on Oracle
+  // Cloud and every other provider it hands out instance credentials.
+  const meta = rejectionOf({ image_url: 'https://169.254.169.254/latest/meta-data/' });
+  check('rejects the cloud metadata address',
+    meta && /IMAGE_HOST_PRIVATE|IMAGE_HOST_NOT_ALLOWED/.test(meta.validation_error_code),
+    meta && meta.validation_error_code);
+
+  const loopback = rejectionOf({ image_url: 'https://localhost:5678/rest/workflows' });
+  check('rejects loopback, which is where n8n itself listens',
+    loopback && /IMAGE_HOST_PRIVATE|IMAGE_HOST_NOT_ALLOWED/.test(loopback.validation_error_code),
+    loopback && loopback.validation_error_code);
+
+  const rfc1918 = rejectionOf({ image_url: 'https://192.168.1.1/admin' });
+  check('rejects an RFC1918 literal',
+    rfc1918 && /IMAGE_HOST_PRIVATE|IMAGE_HOST_NOT_ALLOWED/.test(rfc1918.validation_error_code),
+    rfc1918 && rfc1918.validation_error_code);
+
+  const file = rejectionOf({ image_url: 'file:///etc/passwd' });
+  check('rejects a non-http scheme',
+    file && /NOT_HTTPS|MALFORMED/.test(file.validation_error_code), file && file.validation_error_code);
+
+  // A suffix allow-list must not match a lookalike registered domain.
+  const lookalike = rejectionOf({ image_url: 'https://evil-public.blob.vercel-storage.com.attacker.test/x.jpg' });
+  check('a suffix match cannot be spoofed by appending a domain',
+    lookalike && lookalike.validation_error_code === 'IMAGE_HOST_NOT_ALLOWED',
+    lookalike && lookalike.validation_error_code);
+
+  // Accepts, so the guard is not simply refusing everything.
+  const ok = runPipeline({ ...BODY, image_url: 'https://x.s3.amazonaws.com/a.jpg' }, reply([]));
+  check('accepts another allow-listed object store', ok.rejected === undefined,
+    ok.rejected && ok.rejected.validation_error);
+  const withQuery = runPipeline({ ...BODY, image_url: BODY.image_url + '?v=2&x=1' }, reply([]));
+  check('tolerates a query string', withQuery.rejected === undefined,
+    withQuery.rejected && withQuery.rejected.validation_error);
+  const withPort = runPipeline({ ...BODY, image_url: 'https://abc.public.blob.vercel-storage.com:443/a.jpg' }, reply([]));
+  check('tolerates an explicit port on an allowed host', withPort.rejected === undefined,
+    withPort.rejected && withPort.rejected.validation_error);
+}
+
+// ===========================================================================
+section('1b. Structured HTTP 400 instead of throwing (roadmap 7.5)');
+{
+  // The old node threw on a missing image_url. A throw aborts the execution
+  // before Respond_to_Webhook1, so the caller got a 500 with an empty body and
+  // could not tell a bad request from a broken workflow.
   let threw = false;
-  try { runPipeline({ site_id: 'S' }, reply([])); } catch (e) { threw = true; }
-  check('missing image_url throws (roadmap 7.5: should be a structured 400)', threw);
+  let result = null;
+  try {
+    result = runPipeline({ site_id: 'S' }, reply([]));
+  } catch (e) {
+    threw = true;
+  }
+  check('a missing image_url no longer throws', threw === false);
+  check('a missing image_url is reported as a structured rejection',
+    result && result.rejected && result.rejected.validation_error_code === 'IMAGE_URL_MISSING',
+    result && result.rejected && result.rejected.validation_error_code);
+  check('a rejection sets validation_ok false, which ROUTE_Validation switches on',
+    result.rejected.validation_ok === false);
+
+  // The whole point of validating before BUILD_Vision_Payload: rejected input
+  // costs nothing. Every audit is a metered vision call.
+  check('a rejected request never reaches the vision model',
+    result.modelWasCalled === false);
+
+  const bad = runPipeline({ ...BODY, image_url: 'https://evil.example.com/x.jpg' }, reply([])).rejected;
+  check('a rejection carries a human-readable reason',
+    typeof bad.validation_error === 'string' && bad.validation_error.includes('evil.example'),
+    bad.validation_error);
+  check('a rejection echoes the offending value back',
+    typeof bad.received_value === 'string' && bad.received_value.length > 0);
+  check('a rejection is timestamped', typeof bad.rejected_at === 'string' && bad.rejected_at.length > 0);
+  check('the offending value is truncated, so a huge body cannot bloat the response',
+    runPipeline({ ...BODY, image_url: 'https://evil.example.com/' + 'x'.repeat(5000) }, reply([]))
+      .rejected.received_value.length <= 200);
+
+  // Reporting the wrong cause is what sent an operator debugging a valid URL in
+  // the US pipeline. A disallowed host must not be described as malformed.
+  check('a disallowed host is never reported as a malformed URL',
+    !/not a valid absolute URL/.test(bad.validation_error), bad.validation_error);
 }
 
 // ===========================================================================
@@ -599,6 +723,59 @@ section('9. AI_Field_Audit_v2.json wiring');
   check('the chain is LOG_Audit -> SHAPE_Response -> IF_NonCompliant',
     wf.connections.LOG_Audit.main[0][0].node === 'SHAPE_Response' &&
     wf.connections.SHAPE_Response.main[0][0].node === 'IF_NonCompliant');
+
+  // ---------------------------------------------------- roadmap 7.5 wiring
+  check('ROUTE_Validation exists', by.ROUTE_Validation !== undefined);
+  check('RESPOND_BadRequest exists', by.RESPOND_BadRequest !== undefined);
+  check('the chain is PARSE_Input -> ROUTE_Validation',
+    wf.connections.PARSE_Input.main[0][0].node === 'ROUTE_Validation',
+    JSON.stringify(wf.connections.PARSE_Input));
+  check('ROUTE_Validation routes valid input to BUILD_Vision_Payload on output 0',
+    wf.connections.ROUTE_Validation.main[0][0].node === 'BUILD_Vision_Payload');
+  check('ROUTE_Validation routes a rejection to RESPOND_BadRequest on output 1',
+    wf.connections.ROUTE_Validation.main[1][0].node === 'RESPOND_BadRequest');
+  check('ROUTE_Validation switches on validation_ok',
+    by.ROUTE_Validation.parameters.output === '={{ $json.validation_ok ? 0 : 1 }}',
+    by.ROUTE_Validation.parameters.output);
+  check('RESPOND_BadRequest answers 400, not 200',
+    by.RESPOND_BadRequest.parameters.options.responseCode === 400,
+    String(by.RESPOND_BadRequest.parameters.options.responseCode));
+  check('RESPOND_BadRequest returns the error code and reason, not an empty body',
+    by.RESPOND_BadRequest.parameters.responseBody.indexOf('validation_error_code') !== -1 &&
+    by.RESPOND_BadRequest.parameters.responseBody.indexOf('validation_error') !== -1);
+  // The gate must sit before the paid call, or it saves nothing.
+  check('nothing routes PARSE_Input straight to BUILD_Vision_Payload any more',
+    JSON.stringify(wf.connections.PARSE_Input).indexOf('BUILD_Vision_Payload') === -1);
+
+  // ---------------------------------------------------- roadmap 7.6 wiring
+  check('Claude_Vision_API has a timeout, so a hung provider cannot hold the run open',
+    by.Claude_Vision_API.parameters.options.timeout === 120000,
+    String(by.Claude_Vision_API.parameters.options.timeout));
+  check('Claude_Vision_API retries before failing over',
+    by.Claude_Vision_API.retryOnFail === true && by.Claude_Vision_API.maxTries === 3);
+  check('Claude_Vision_API routes failure to an error output instead of aborting',
+    by.Claude_Vision_API.onError === 'continueErrorOutput', by.Claude_Vision_API.onError);
+  check('Vision_Fallback exists', by.Vision_Fallback !== undefined);
+  check('Claude_Vision_API output 0 continues to PARSE_Response',
+    wf.connections.Claude_Vision_API.main[0][0].node === 'PARSE_Response');
+  check('Claude_Vision_API output 1 goes to Vision_Fallback',
+    wf.connections.Claude_Vision_API.main[1][0].node === 'Vision_Fallback');
+  check('Vision_Fallback rejoins the chain at PARSE_Response',
+    wf.connections.Vision_Fallback.main[0][0].node === 'PARSE_Response');
+  // A fallback on the same vendor shares the outage it is meant to survive.
+  check('the fallback is a different vendor from the primary',
+    by.Vision_Fallback.parameters.body.indexOf("'openai/gpt-4o'") !== -1,
+    by.Vision_Fallback.parameters.body);
+  // Re-rendering the prompt would risk grading against a different checklist.
+  check('the fallback reuses the payload BUILD_Vision_Payload already rendered',
+    by.Vision_Fallback.parameters.body.indexOf("$('BUILD_Vision_Payload').first().json.payload") !== -1);
+  check('Vision_Fallback also has a timeout',
+    by.Vision_Fallback.parameters.options.timeout === 120000);
+  check('Vision_Fallback continues rather than aborting if it fails too',
+    by.Vision_Fallback.onError === 'continueRegularOutput');
+  check('Vision_Fallback carries the OpenRouter credential, so it imports ready-to-run',
+    by.Vision_Fallback.credentials?.httpHeaderAuth?.id === 'Yo4OGxALKxIBKco8',
+    JSON.stringify(by.Vision_Fallback.credentials));
   check('IF_NonCompliant still routes true to the notifier and both branches to the responder',
     wf.connections.IF_NonCompliant.main[0].some(function (c) { return c.node === 'NOTIFY_OpsManager'; }) &&
     wf.connections.IF_NonCompliant.main[0].some(function (c) { return c.node === 'Respond_to_Webhook1'; }) &&
@@ -630,7 +807,7 @@ section('9. AI_Field_Audit_v2.json wiring');
   // The workflow JSON must match the files this harness tested, or the tests
   // prove nothing about what actually runs.
   const fileOf = {
-    PARSE_Input: 'ind_01_parse_input.js',
+    PARSE_Input: 'ind_01_validate_input.js',
     BUILD_Vision_Payload: 'ind_02_build_payload.js',
     PARSE_Response: 'ind_03_derive_verdict.js',
     SHAPE_Response: 'ind_04_shape_response.js',

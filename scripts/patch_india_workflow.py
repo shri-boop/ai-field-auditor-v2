@@ -15,9 +15,14 @@ the offline test harness (scripts/test_india.mjs). The US workflow does the same
 CHAIN AFTER PATCHING
 --------------------
     Webhook
-      -> PARSE_Input            ind_01_parse_input.js
+      -> PARSE_Input            ind_01_validate_input.js   SSRF guard, never throws
+      -> ROUTE_Validation       NEW NODE, on validation_ok
+           |- 0 valid
+           `- 1 rejected -> RESPOND_BadRequest   NEW NODE, HTTP 400 with a reason
       -> BUILD_Vision_Payload   ind_02_build_payload.js    severity-tagged checklist
-      -> Claude_Vision_API
+      -> Claude_Vision_API      120 s timeout, 3 tries, onError: continueErrorOutput
+           |- 0 ok
+           `- 1 failed -> Vision_Fallback  NEW NODE, openai/gpt-4o
       -> PARSE_Response         ind_03_derive_verdict.js   DERIVES status in code
       -> LOG_Audit              onError: continueRegularOutput
       -> SHAPE_Response         ind_04_shape_response.js   NEW NODE, sets persisted
@@ -42,6 +47,20 @@ WHAT CHANGED AND WHY (roadmap 7.1 / 7.2 / 7.3 in docs/IND_FIRE_AUDIT_WORKFLOW.md
      now continues and reports persisted: false, which the dashboard already
      renders and the alert body states outright.
 
+7.4  PARSE_Input restricts image_url to https on an allow-listed object-store
+     host, with no userinfo, no IP literals and no private ranges. The URL is
+     caller-controlled and OpenRouter dereferences it, which made the audit
+     webhook a request-forgery primitive pointed at whatever the caller named.
+
+7.5  ROUTE_Validation + RESPOND_BadRequest. PARSE_Input no longer throws, so a
+     malformed request gets HTTP 400 and a reason instead of a 500 with an empty
+     body, and never reaches the paid vision call.
+
+7.6  Claude_Vision_API gets a 120 s timeout and 3 tries, and on failure routes to
+     Vision_Fallback on openai/gpt-4o. Previously one provider incident lost the
+     audit outright: no timeout meant a hung request held the execution open, and
+     with no fallback there was nothing to fail over to.
+
 RUN
 ---
     python3 scripts/patch_india_workflow.py            # idempotent
@@ -62,7 +81,7 @@ TABLE = "field_audit_logs"
 # from transcribing the model's verdict to deriving one: renaming it would break
 # every $('PARSE_Response') reference and the node's own execution history.
 JS_NODES = {
-    "PARSE_Input": "ind_01_parse_input.js",
+    "PARSE_Input": "ind_01_validate_input.js",
     "BUILD_Vision_Payload": "ind_02_build_payload.js",
     "PARSE_Response": "ind_03_derive_verdict.js",
     "NOTIFY_OpsManager": "ind_05_build_alert.js",
@@ -71,6 +90,30 @@ JS_NODES = {
 SHAPE_NODE_NAME = "SHAPE_Response"
 SHAPE_NODE_FILE = "ind_04_shape_response.js"
 SHAPE_NODE_ID = "ind-shape-response-0001"
+
+# ---------------------------------------------------------------- roadmap 7.5
+ROUTE_NODE_NAME = "ROUTE_Validation"
+ROUTE_NODE_ID = "ind-route-validation-0002"
+RESPOND_400_NAME = "RESPOND_BadRequest"
+RESPOND_400_ID = "ind-respond-badrequest-0003"
+
+# ---------------------------------------------------------------- roadmap 7.6
+FALLBACK_NODE_NAME = "Vision_Fallback"
+FALLBACK_NODE_ID = "ind-vision-fallback-0004"
+
+# Same fallback as the US workflow (FALLBACK_MODEL in build_us_workflow.py). A
+# different vendor on purpose: failing over from Claude to another Anthropic model
+# would share the outage being failed over from.
+FALLBACK_MODEL = "openai/gpt-4o"
+
+# A vision call on a large photo is slow, but not unbounded. Without a timeout a
+# hung provider connection holds the n8n execution open indefinitely and the
+# caller's HTTP request with it.
+VISION_TIMEOUT_MS = 120000
+
+# OpenRouter credential, reused by the fallback node. Recorded for the same reason
+# as the webhook and Postgres credentials: so the workflow imports ready-to-run.
+CRED_OPENROUTER = {"httpHeaderAuth": {"id": "Yo4OGxALKxIBKco8", "name": "OpenRouter"}}
 
 # LOG_Audit column mappings. Existing entries are preserved; these are set or
 # overwritten.
@@ -240,6 +283,153 @@ def ensure_shape_node(wf, by_name):
     }
 
 
+def ensure_validation_nodes(wf, by_name):
+    """
+    Roadmap 7.5 — insert ROUTE_Validation + RESPOND_BadRequest after PARSE_Input.
+
+    PARSE_Input used to throw on bad input. A throw aborts the execution before
+    Respond_to_Webhook1 runs, so the caller got HTTP 500 and an empty body and
+    could not tell "I sent you a bad URL" from "your workflow is broken". It now
+    emits validation_ok and this pair turns a false into a real 400.
+
+    Placing the gate BEFORE BUILD_Vision_Payload is the point: a rejected request
+    never reaches Claude_Vision_API, so malformed input costs nothing. Every audit
+    is a metered vision call.
+    """
+    parse_pos = by_name["PARSE_Input"]["position"]
+
+    if ROUTE_NODE_NAME not in by_name:
+        wf["nodes"].append({
+            "parameters": {
+                "mode": "expression",
+                "numberOutputs": 2,
+                # 0 = valid, 1 = rejected. Same expression as the US ROUTE_Validation.
+                "output": "={{ $json.validation_ok ? 0 : 1 }}",
+                "options": {},
+            },
+            "id": ROUTE_NODE_ID,
+            "name": ROUTE_NODE_NAME,
+            "type": "n8n-nodes-base.switch",
+            "typeVersion": 3.2,
+            "position": [parse_pos[0] + 240, parse_pos[1]],
+        })
+    else:
+        node = by_name[ROUTE_NODE_NAME]
+        node["parameters"]["output"] = "={{ $json.validation_ok ? 0 : 1 }}"
+        node["parameters"]["numberOutputs"] = 2
+
+    if RESPOND_400_NAME not in by_name:
+        wf["nodes"].append({
+            "parameters": {
+                "respondWith": "json",
+                # advisory_only mirrors the success response: this platform screens,
+                # it does not certify, and a rejection should not read as a verdict.
+                "responseBody": "={{ JSON.stringify({ status: 'REJECTED', "
+                                "error_code: $json.validation_error_code, "
+                                "error: $json.validation_error, "
+                                "received_value: $json.received_value, "
+                                "advisory_only: true }) }}",
+                "options": {"responseCode": 400},
+            },
+            "id": RESPOND_400_ID,
+            "name": RESPOND_400_NAME,
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [parse_pos[0] + 240, parse_pos[1] + 240],
+        })
+    else:
+        by_name[RESPOND_400_NAME]["parameters"]["options"]["responseCode"] = 400
+
+    # Rewire: PARSE_Input -> ROUTE_Validation -> {0: BUILD_Vision_Payload,
+    # 1: RESPOND_BadRequest}.
+    wf["connections"]["PARSE_Input"] = {
+        "main": [[{"node": ROUTE_NODE_NAME, "type": "main", "index": 0}]]
+    }
+    wf["connections"][ROUTE_NODE_NAME] = {
+        "main": [
+            [{"node": "BUILD_Vision_Payload", "type": "main", "index": 0}],
+            [{"node": RESPOND_400_NAME, "type": "main", "index": 0}],
+        ]
+    }
+
+
+def ensure_vision_resilience(wf, by_name):
+    """
+    Roadmap 7.6 — timeout, retries and a fallback model on the vision call.
+
+    Before this the node had options: {} — no timeout at all — no retryOnFail, and
+    no error output. So a hung OpenRouter connection held the execution (and the
+    caller's request) open indefinitely, and any transport failure ended the audit
+    with nothing written and no alert: the same class of silent loss that 7.3 fixed
+    for the database, still open for the model call.
+
+    Retries come first because the overwhelming majority of failures are transient.
+    Only once three attempts have failed does the fallback fire, on a different
+    vendor so the second attempt is not inside the first one's outage.
+    """
+    vision = by_name["Claude_Vision_API"]
+    vision["parameters"]["options"]["timeout"] = VISION_TIMEOUT_MS
+    vision["retryOnFail"] = True
+    vision["maxTries"] = 3
+    vision["waitBetweenTries"] = 2000
+    # Transport/provider failure routes to output 1 -> Vision_Fallback.
+    vision["onError"] = "continueErrorOutput"
+
+    vision_pos = vision["position"]
+
+    if FALLBACK_NODE_NAME not in by_name:
+        wf["nodes"].append({
+            "parameters": {
+                "method": "POST",
+                "url": "https://openrouter.ai/api/v1/chat/completions",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth",
+                "sendBody": True,
+                "contentType": "raw",
+                "rawContentType": "application/json",
+                # Reuse the payload BUILD_Vision_Payload already rendered, swapping
+                # only the model. Rebuilding it would risk the fallback grading
+                # against a different checklist than the primary — the one thing a
+                # fallback must not do.
+                "body": "={{ JSON.stringify(Object.assign({}, "
+                        "$('BUILD_Vision_Payload').first().json.payload, "
+                        "{ model: '" + FALLBACK_MODEL + "' })) }}",
+                "options": {"timeout": VISION_TIMEOUT_MS},
+            },
+            "id": FALLBACK_NODE_ID,
+            "name": FALLBACK_NODE_NAME,
+            "type": "n8n-nodes-base.httpRequest",
+            "typeVersion": 4,
+            "position": [vision_pos[0], vision_pos[1] + 260],
+            "credentials": CRED_OPENROUTER,
+            "retryOnFail": True,
+            "maxTries": 2,
+            "waitBetweenTries": 3000,
+            # If the fallback fails too, continue anyway: PARSE_Response reports a
+            # SYSTEM_ERROR verdict, which is visible. Aborting here would be silent.
+            "onError": "continueRegularOutput",
+        })
+    else:
+        fb = by_name[FALLBACK_NODE_NAME]
+        fb["parameters"]["body"] = ("={{ JSON.stringify(Object.assign({}, "
+                                    "$('BUILD_Vision_Payload').first().json.payload, "
+                                    "{ model: '" + FALLBACK_MODEL + "' })) }}")
+        fb["parameters"]["options"]["timeout"] = VISION_TIMEOUT_MS
+        fb["credentials"] = CRED_OPENROUTER
+
+    # Rewire: Claude_Vision_API -> {0: PARSE_Response, 1: Vision_Fallback},
+    # and the fallback rejoins the same chain.
+    wf["connections"]["Claude_Vision_API"] = {
+        "main": [
+            [{"node": "PARSE_Response", "type": "main", "index": 0}],
+            [{"node": FALLBACK_NODE_NAME, "type": "main", "index": 0}],
+        ]
+    }
+    wf["connections"][FALLBACK_NODE_NAME] = {
+        "main": [[{"node": "PARSE_Response", "type": "main", "index": 0}]]
+    }
+
+
 def main():
     check_only = "--check" in sys.argv
 
@@ -277,6 +467,8 @@ def main():
     patch_log_audit(by_name["LOG_Audit"])
     patch_if_node(by_name["IF_NonCompliant"])
     ensure_shape_node(wf, by_name)
+    ensure_validation_nodes(wf, by_name)
+    ensure_vision_resilience(wf, by_name)
 
     if GMAIL_NODE in by_name:
         by_name[GMAIL_NODE]["parameters"]["sendTo"] = ALERT_RECIPIENT
@@ -301,11 +493,19 @@ def main():
     print("  LOG_Audit columns: " + str(len(COLUMNS))
           + "  (onError=continueRegularOutput, maxTries=3)")
     print("  IF_NonCompliant now branches on the boolean alert_required")
+    print("  " + ROUTE_NODE_NAME + " + " + RESPOND_400_NAME
+           + ": bad input gets HTTP 400, never reaches the model (7.5)")
+    print("  Claude_Vision_API: timeout=" + str(VISION_TIMEOUT_MS)
+           + "ms, maxTries=3, falls back to " + FALLBACK_MODEL + " (7.6)")
     print()
     print("NEXT, IN THIS ORDER:")
-    print("  1. Apply scripts/db/004_field_audit_logs_severity.sql")
+    print("  1. No DB migration is needed for this change - no new columns.")
     print("  2. Re-import this file into n8n, UPDATING the existing workflow")
     print("     (a second copy would fight over /webhook/audit-field-photov2)")
+    print("  3. This adds 3 nodes and re-wires 3 connections, so confirm on the")
+    print("     canvas: PARSE_Input -> ROUTE_Validation -> {BUILD_Vision_Payload,")
+    print("     RESPOND_BadRequest} and Claude_Vision_API error output ->")
+    print("     " + FALLBACK_NODE_NAME + " -> PARSE_Response.")
     return 0
 
 
