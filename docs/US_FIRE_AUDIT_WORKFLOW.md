@@ -638,6 +638,24 @@ does.
   and presigned URLs pass, so no code change is needed.
 - **`AI_Field_Audit.json` is dead** — the original 9-node prototype, referenced by
   nothing.
+- **`site_id`'s `'UNKNOWN-SITE'` default is dead code — queued for the next
+  re-import.** `app/api/audit/route.ts` now rejects an empty `site_id` with
+  `SITE_ID_MISSING` → 400 for **both** regions, so the default in
+  `01_validate_input.js` is unreachable through the proxy. India's equivalent
+  rejects outright; this should follow, so a direct US caller omitting `site_id` is
+  refused here too.
+
+  Deliberately **not** removed in the change that made it unreachable: that would
+  have left the committed artifact out of step with the running workflow until
+  someone re-imported, and a silent divergence between artifact and live workflow is
+  the failure mode this repo has already been bitten by once. Fold it into the next
+  US re-import for any reason, so the edit ships with an import instead of waiting
+  as a diff.
+
+  Rationale for rejecting rather than defaulting is in
+  [IND_FIRE_AUDIT_WORKFLOW.md](IND_FIRE_AUDIT_WORKFLOW.md) §4: an audit not attached
+  to a building cannot be retrieved, billed, or included in a statutory pack, and it
+  costs a paid vision call to produce.
 
 ---
 

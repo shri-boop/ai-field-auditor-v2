@@ -1,8 +1,16 @@
 # Sign-off — design proposal
 
-**Status: proposal. Nothing here is built.** This exists to be argued with before
-code is written, because sign-off is the first legally meaningful thing this
+**Status: proposal, reviewed. Nothing here is built.** This exists to be argued with
+before code is written, because sign-off is the first legally meaningful thing this
 product will do.
+
+> **Read [§14](#14-review--what-has-to-change-before-this-is-built) alongside §1–§13.**
+> A review against the schema as it actually stands found three blockers — the
+> signoff table cannot reference an India audit (§14.1), the firm-vs-individual
+> distinction is structural rather than a field (§14.2), and §5's expiry control
+> silently excludes every Indian signer (§14.3) — plus four gaps and one missed open
+> question. The spine of the design survives the review; the sections below are not
+> superseded, but §2, §5, §6, §11 and §12 each need the amendment §14 describes.
 
 Written from the point of view of the person who carries the risk: the owner of a
 Florida fire protection company whose licence is on the line when a record leaves
@@ -428,5 +436,249 @@ prints as superseded, with the date, rather than vanishing.
      jurisdiction key would be `IN-MH` — but it needs the qualification-based variant
      designed, not assumed.
 
+     **Amended by review.** The first of those two reasons to hold is now discharged:
+     the India workflow derives its verdict in code and no longer aborts on a database
+     failure (IND §7.1–7.3, shipped). The second is larger than "a variant": see
+     §14.2. `signing_authority` has to be declared per jurisdiction because Florida
+     and Maharashtra disagree about which credential is the licensed instrument, and
+     §14.3 shows §5's expiry control has to be relocated onto the firm for India
+     rather than applied to the engineer. Both belong in the registry schema from its
+     first commit (§14.10).
+
    Meanwhile the cheap credibility win is already taken: the dashboard now states the
    Maharashtra statute correctly rather than "NBC 2016 + CFO Mumbai norms".
+
+
+---
+
+## 14. Review — what has to change before this is built
+
+A read-through of §1–§13 against the schema as it actually stands, before step 1 of
+§11's migration order starts. **The spine of this design is right and is not what
+follows disputes.** Specifically: two kinds of sign-off, snapshot-not-reference,
+jurisdiction-scoped credentials reusing `CODE_BASIS_REGISTRY` keys, registries with
+honest `requires_confirmation` stubs, reason codes as the accuracy feedback loop, and
+starting with the registry because it is the cheapest thing to get wrong now. Those
+hold, and India strengthens rather than weakens them.
+
+What follows is three blockers, four gaps, and one open question that was missed.
+
+### 14.1 BLOCKER — `field_audit_signoffs` cannot reference an India audit at all
+
+§6 declares:
+
+```
+audit_id        text        -- FK to field_audit_us_logs.audit_id
+```
+
+**India has no `audit_id`.** `field_audit_logs` is keyed on `id`, an integer serial,
+and this is stated outright in `scripts/nodes/history_01_validate_query.js`:
+
+> `audit_id` is a MINTED identifier and exists only on the US table. India has no
+> such column — India records are identified by `site_id` and timestamp.
+
+So the signoff table as designed can only ever hold US rows. The options are a
+polymorphic reference (`region` + `audit_ref`), which pushes the problem into every
+query, or **minting a real `audit_id` for India**, which is the right answer: it is
+the same identifier shape the US already uses, it is what a Form B evidence pack has
+to cite per finding, and `site_id` + a `text` timestamp is not a key.
+
+This lands with the queued `audit_timestamp` migration (§14.8) because both rewrite
+the same table and both are Form B prerequisites. Do them together, once.
+
+### 14.2 BLOCKER — the firm-vs-individual distinction is structural, not a field
+
+This is the one that most needs changing, and it is deeper than §3's closing
+paragraph treats it.
+
+§2 lists **"Company licence number"** as a field on the individual's account, and §3
+adds that it is "separate and also jurisdiction-scoped". That models the firm licence
+as an *accompaniment* to a primary individual credential. For Florida that is
+correct: the individual holds the permit, the dealer permit qualifies it.
+
+**Maharashtra inverts it.** The **Licensed Agency** is the licensed entity — licensed
+by the Director of Maharashtra Fire Services, in categories by scope of work. The
+signing engineer's standing is a *qualification* (B.E./Diploma Fire, NFSC Nagpur, IFE
+India), not a personal licence number. The signature is the Agency's, prepared by a
+qualified engineer.
+
+So the two jurisdictions disagree about **which credential is load-bearing**, and no
+amount of adding fields resolves that. The registry has to say which:
+
+```
+FL:
+  signing_authority: INDIVIDUAL     # firm permit is a required accompaniment
+IN-MH:
+  signing_authority: FIRM           # engineer qualification is a required accompaniment
+```
+
+Three consequences that follow:
+
+1. **The firm becomes a first-class entity, not a string.** It has its own licence
+   number, its own expiry, and its own category limiting scope of work. A string
+   field on a user cannot carry an expiry, and §5's control is an expiry check.
+2. **Membership is a dated relationship.** A signature must snapshot *which agency,
+   under which licence, the engineer signed on behalf of* — engineers change
+   employer, and §2's own argument ("a record signed in 2026 must still show the
+   credential as it stood in 2026") applies with equal force to the firm.
+3. **Validity is evaluated per `signing_authority`.** Under `INDIVIDUAL`: the
+   individual permit must be unexpired and the firm permit must cover the equipment
+   class. Under `FIRM`: the Agency licence must be unexpired *and its category must
+   cover the scope of work*, and the engineer must hold a recorded qualification.
+
+Getting this wrong in either direction is bad in a specific way. Force India into the
+individual-shaped model and every Indian signature misattributes statutory
+responsibility to a person the Act does not license. Make everything firm-shaped and
+Florida loses the individual permit that is the actual instrument there.
+
+### 14.3 BLOCKER — §5 silently excludes every Indian signer
+
+§5 is described as "the single most valuable control in this whole design", and it
+ends:
+
+> No expiry recorded → `FIELD_VERIFIED` unavailable; desk review only
+
+An Indian fire engineer's qualification **has no expiry**. A B.E. in Fire
+Engineering does not lapse; neither does an NFSC Nagpur qualification. Under the rule
+as written, no Indian engineer could ever field-verify — not as a policy decision, but
+as an accident of a US-shaped assumption about what a credential is.
+
+The fix is to stop conflating *perpetual* with *unknown*, which are opposite
+epistemic states:
+
+| `expiry_semantics` | Meaning | §5 behaviour |
+|---|---|---|
+| `EXPIRES` | Has a renewal date (FL permit, CA licence) | Full §5: block on expired, warn at 30 days |
+| `PERPETUAL` | Genuinely does not expire (a degree, NFSC) | No expiry check. Requires `evidence_on_file: true` instead |
+| `UNKNOWN` | We have not recorded one | Desk review only — today's behaviour, correctly reserved for actual ignorance |
+
+`PERPETUAL` must not be a free pass: it substitutes a different control (evidence of
+the qualification on file, verified once) for a control that cannot apply. Otherwise
+`PERPETUAL` becomes the value everyone selects to skip the expiry gate.
+
+Note this also affects the **firm** side in Maharashtra, in the opposite direction:
+the Agency licence *does* expire and *is* renewable, so under `signing_authority:
+FIRM` the expiry control moves onto the firm — which is where §5's value actually
+lands for India. §5 is not weakened by India; it is relocated.
+
+### 14.4 GAP — Form B is a period artefact and there is nowhere to put it
+
+§6 is one signoff row per audit. Form B is **one certificate per premises per
+half-year, supported by many audits.** §7.9 of the India document notices the cadence
+difference ("it should accumulate the half-year's audits for a premises into the
+evidence that supports that period's Form B") but §6's schema has no entity for it.
+
+These are two distinct levels of attestation and both are needed:
+
+- **Per audit:** desk review or field verification. `field_audit_signoffs`, as designed.
+- **Per premises per period:** the statutory certificate. Needs something like
+  `compliance_periods` (jurisdiction, `site_id`, period `H1`/`H2` + year, status,
+  artefact reference) and a link from the audits that constitute its evidence.
+
+Collapsing them would mean either signing a period as though it were an audit, or
+producing Form B with no record of what evidence it rested on — and the second is the
+thing a customer is actually buying.
+
+### 14.5 GAP — Form B's wording is prescribed; §12's model assumes we author it
+
+§12 authors attestation wording, which is right for Florida: that text is ours, and
+the discipline of never saying "certify" unless true is exactly correct.
+
+Form B is different. It is a **form prescribed under the Rules 2009**. Its wording is
+not ours to compose, and composing something that looks like it would be worse than
+not offering it. So the model needs to distinguish:
+
+- an **attestation we author** — Florida, wording under our control, §12 applies
+- a **statutory form we populate** — Form B, wording fixed by rule, our job is
+  correct population and an honest evidence pack
+
+Until the prescribed text is obtained from a primary source, Form B support should
+produce the *evidence pack* and stop short of rendering the form — the same
+discipline as `edition_verified: false` on standard editions.
+
+### 14.6 GAP — the write path will not be atomic as described
+
+§11 describes the write as:
+
+> `POST /api/signoff` → new n8n workflow → `UPDATE field_audit_us_logs` +
+> `INSERT field_audit_signoffs`
+
+Two n8n Postgres nodes are **two transactions**. If the first succeeds and the second
+fails, the audit row says `CONFIRMED` while the history table — which §6 designates
+as "the truth" — has no row for it. That is a signature that legally did not happen
+and visibly did. The reverse order fails the other way.
+
+This repo's prevailing pattern makes the risk worse rather than better: `LOG_Audit`
+carries `onError: continueRegularOutput` precisely so a database failure cannot
+discard a finding. That tolerance is correct for audit logging and **exactly wrong
+here** — a sign-off that half-committed must fail loudly, not continue.
+
+So the write must be a single statement: one `WITH ... AS (INSERT ...) UPDATE ...`,
+or a stored function called once. And it needs the §6 transition table enforced
+server-side, not just in the UI.
+
+### 14.7 GAP — supersede-on-re-audit keys on a column India allows to be null
+
+§6: "A new audit of the same `asset_tag` at the same site should mark the prior
+sign-off `SUPERSEDED`."
+
+India's `asset_tag` is optional — `VALIDATE_Input` emits `null` when it is absent.
+With a null asset tag, that rule either matches nothing or matches every audit at
+the site, and the second would supersede signatures on unrelated devices.
+
+So either `asset_tag` becomes **required for any audit that can be signed** (defensible:
+§7.9 already argues a site holds many devices and a site id alone cannot identify
+what was inspected), or supersede scoping is declared explicitly and narrowly. The
+first is preferable and is a small change to make now.
+
+### 14.8 Queued, and their relationship to this design
+
+Two cleanups agreed to be folded into the next relevant change rather than given
+their own PR:
+
+- **US `site_id` dead code.** `scripts/nodes/01_validate_input.js:138` still defaults
+  `site_id` to `'UNKNOWN-SITE'`. Since `/api/audit` now rejects an empty `site_id`
+  for both regions, that default is unreachable through the proxy. Remove it on the
+  **next US workflow re-import** — not before, so the change ships with an import
+  rather than sitting as a divergence between the artifact and the running workflow.
+- **India `audit_timestamp` `text` → `timestamptz`.** This is a **prerequisite for
+  Form B**, not a tidy-up. Form B is defined by a date range — H1 is January to June
+  — and Postgres has no `text >= timestamptz` operator, so a half-yearly evidence
+  pack cannot be selected from the column as it stands. §14.4's `compliance_periods`
+  work is blocked on it.
+
+  Do it in the same migration as §14.1's `audit_id`: same table, same rewrite, both
+  Form B prerequisites, one re-import.
+
+### 14.9 Open question that was missed — India personal data
+
+§13.3 asks about Florida retention. There is no India equivalent, and there needs to
+be one, because §6 commits to append-only and §13.3 anticipates "probably never
+deleted".
+
+Storing an engineer's name, qualification, employer and signature history is personal
+data under India's **Digital Personal Data Protection Act 2023**. Statutory retention
+generally prevails over an erasure request, so the likely answer is that append-only
+survives — but that is an assumption, and this document's own standard is that
+assumptions about statute get verified against a primary source or flagged, not
+asserted. It belongs in §13 as a question for counsel before India sign-off is built,
+alongside who the data fiduciary is when the signing engineer is employed by a
+customer's Licensed Agency rather than by us.
+
+### 14.10 What this does to the build order
+
+§11's step 1 — `CREDENTIAL_REGISTRY` first — is still right, and India makes the
+argument stronger rather than weaker. But the registry's **schema** must carry
+`signing_authority` and `expiry_semantics` from its first commit, even while only
+Florida is seeded as verified.
+
+That is §4's own "why not defer this" argument applied to itself: adding a field to a
+registry is free today and unrecoverable for anything already signed. A signature
+stored without knowing whether the individual or the firm was the licensed party
+cannot have that inferred later, exactly as a signature stored without its
+jurisdiction cannot.
+
+Revised step 1, therefore: registry with Florida verified, `IN-MH` as a stub flagged
+`requires_confirmation: true`, and both new fields present from the start. `IN-MH`
+seeded as a stub is what proves the two-authority model actually holds before any of
+it is load-bearing.
