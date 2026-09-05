@@ -423,12 +423,26 @@ table is a signature that changes when the user record changes.
    jurisdiction-scoped credential snapshot, the §15 verification snapshot,
    append-only enforcement, `record_signoff()` for atomicity (§14.6), India's
    denormalised columns, and `scripts/db/007_verify.sql` to test it on the engine.
-3. Users / credentials schema on the new database
-4. Auth.js, login, MFA — no sign-off UI yet
-5. The write workflow, exercised by curl
-6. The jurisdiction-match check from §4, testable offline against the registry
+3. ⬜ **NEXT** — Users / organisations / credentials schema on Neon (§17.6).
+   Provisioning is a manual step outside this repo; the schema does not depend on it
+   existing and can be written first. Blocks 4–7.
+4. Auth.js, login, MFA — no sign-off UI yet. **This is also what unblocks tenant
+   isolation** (§17.4): until a session resolves an organisation, `org_id` on the
+   audit tables stays NULL and no read path can filter on it.
+5. The write workflow, calling `record_signoff()` — exercised by curl. It must call
+   the function and not compose SQL; the function is what makes the two writes atomic.
+6. The jurisdiction-match check from §4. Generate the n8n node from
+   `lib/credential-registry.mjs` with a `--check`; do **not** hand-copy it. A second
+   hand-maintained copy of licensing data is the same divergence class as a UI-only
+   node rename.
 7. Sign-off UI: single record first, then the pending queue, then bulk
 8. Retire shared Basic auth for signing users
+
+Also outstanding, and deliberately not blocking the above: `compliance_periods` for
+Form B (§14.4), the DPDP question (§14.9), EXIF/capture-time validation — which
+matters more once `FIELD_VERIFIED` exists, since "I physically inspected this" attached
+to a photograph of unknown age is the weakest link an opposing party would attack —
+and rate limiting on `/api/audit`, the only unmetered spend path.
 
 Steps 1–6 change nothing a user sees, which is the right shape for something this
 consequential. Step 1 is also the only step that produces something worth showing a
@@ -1047,7 +1061,28 @@ built against an unscoped model and then need revisiting. Existing rows are
 backfilled to `ORG-KRATU-INTERNAL` — visibly internal, for the same reason 006 marked
 backfilled identifiers `FA-INB-` rather than blending them in.
 
-### 17.6 Accounts live on Neon
+### 17.6 How organisations are keyed — decided
+
+```
+org_key  text PRIMARY KEY   CHECK (org_key ~ '^ORG-[A-Z0-9-]{3,40}$')
+org_name text NOT NULL      -- mutable, display only
+```
+
+A readable immutable key rather than a UUID, and it is `org_key` that crosses into the
+Oracle database as `org_id` on audit rows.
+
+Three reasons. It is already the shape of the data — migration 009 backfilled
+`ORG-KRATU-INTERNAL`, and a UUID scheme would leave that as a permanent exception. It
+makes every log line, Telegram alert and Form B evidence pack legible, which matters
+for a product whose output is read by fire officers rather than engineers. And
+provisioning is manual for the first several customers, so assigning a sensible key
+costs nothing.
+
+`org_name` is separate and mutable, per §17.2: reference what is merely scoped. A
+company that rebrands should see the new name on all of its audits, including ones
+signed years earlier.
+
+### 17.7 Accounts live on Neon
 
 Decided. The original framing in §11 — "reachable from Vercel" — was the weakest
 version of the argument. The real reasons:

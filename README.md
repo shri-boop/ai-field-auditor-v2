@@ -1,6 +1,160 @@
 # ai-field-auditor-v2
 
+**AQUILA** — fire compliance screening by KRATU AI Labs. A Next.js dashboard on Vercel
+plus three n8n workflows on an Oracle Cloud box, screening equipment photographs
+against the code basis of a resolved jurisdiction.
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [v0](https://v0.app).
+
+---
+
+# Start here — state of the project
+
+*Read this before changing anything. It exists so nobody has to reconstruct the
+current state, the constraints, or the traps from git history.*
+
+## What the product is, honestly
+
+**Advisory screening, not certification.** Every output says so. A photograph is
+graded against a checklist, the verdict is derived **in code** from severities the
+model reported, and a human still has to sign. Nothing here certifies anything, and
+the `advisory_only` flag is load-bearing rather than decorative.
+
+Both regions are live in production. **There are no customers yet** — KRATU AI Labs is
+an AI automation agency building this as a product, not a fire protection company
+using it internally. That matters for two reasons that recur throughout the design:
+the Oracle box is demo infrastructure rather than product infrastructure, and
+multi-tenancy has to be designed for before it is needed.
+
+## Where things stand
+
+| Area | State |
+|---|---|
+| India audit pipeline | ✅ live — verdict derived in code, severity tiers, SSRF guard, structured 400s, timeout + retry + `gpt-4o` fallback |
+| US audit pipeline | ✅ live — same plus 9 jurisdictions, 9 equipment classes, OSHA overlay, SLA tiers |
+| Records / history | ✅ live — read-only lookup over both logs |
+| Webhook auth | ✅ all three require Header Auth; unauthenticated returns 403 |
+| Sign-off — credential registry | ✅ `lib/credential-registry.mjs`, FL verified, everything else flagged stubs |
+| Sign-off — history table + write path | ✅ `field_audit_signoffs`, append-only, atomic row-locked `record_signoff()` |
+| Sign-off — accounts, auth, MFA, UI | ❌ **not started** — this is the next work |
+| Multi-tenant isolation | ❌ **NOT SAFE FOR TWO CUSTOMERS** — see below |
+| Form B (India statutory artefact) | ❌ researched, blocked on `compliance_periods` + a confirmed `IN-MH` registry |
+
+### ⚠️ The system is not multi-tenant-safe yet
+
+`org_id` exists on both audit tables and on `field_audit_signoffs` (migration 009),
+but **nothing populates it and no read path filters on it.** The Records query filters
+on `site_id`, which is caller-supplied, and one shared HTTP Basic credential serves
+every user.
+
+So a user in one organisation could read another's audits by guessing a `site_id`, and
+two customers who both name a building `SITE-001` would share rows. 009 made this
+*fixable*; it is not fixed. Full conditions in
+[SIGNOFF_DESIGN.md §17.4](docs/SIGNOFF_DESIGN.md). **Do not onboard a second
+customer** until all three are met.
+
+## The environment this is developed in
+
+Three constraints shape how work gets verified. They are not incidental.
+
+| Constraint | Consequence |
+|---|---|
+| npm registry returns 403 | `node_modules` is absent; `next build` is impossible |
+| **No Postgres, and container registries are blocked** | **SQL cannot be executed before it is committed** |
+| No outbound network | migrations cannot be tried against a real database first |
+
+The second is the important one, and it has cost two production bugs — a missing row
+lock and a `CREATE OR REPLACE VIEW` failure. Mitigation, not solution: every migration
+ships with a `*_verify.sql` harness that runs on the real engine, prints PASS/FAIL per
+assertion, and rolls back. **Run those. A failure there is expected feedback, not a
+surprise.** See [SIGNOFF_DESIGN.md §16](docs/SIGNOFF_DESIGN.md).
+
+## Verify everything before claiming anything works
+
+```bash
+unset NODE_OPTIONS                      # required before any node/npm in the sandbox
+
+node scripts/test_india.mjs             # India pipeline + workflow wiring
+node scripts/test_pipeline.mjs          # US pipeline
+node scripts/test_history.mjs           # records lookup
+node scripts/test_credentials.mjs       # credential registry
+node scripts/test_signoff_sql.mjs       # sign-off SQL — STRUCTURE ONLY, executes no SQL
+
+python3 scripts/patch_india_workflow.py --check
+python3 scripts/build_us_workflow.py --check
+python3 scripts/build_history_workflow.py --check
+
+tsc --noEmit -p tsconfig.json   # filter TS2307|2591|2503|7026|2875|7006|7031|2882|7053|2688|2322
+```
+
+Those `tsc` codes are missing-dependency cascades from the absent `node_modules`, not
+real errors. Two unfiltered lines about a `key` property are pre-existing in
+`components/`.
+
+On the database, after applying any migration:
+
+```bash
+docker exec -i ai-stack-postgres-1 sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/db/<NNN>_verify.sql
+# expect: VERDICT: OK
+```
+
+Verify scripts print a **verdict**, never an expected count. An instruction that once
+said "expect 16 passed" for a 15-assertion script is exactly how people learn to
+ignore a real failure.
+
+## Deployment rules
+
+- **Migration before workflow re-import, always.** Reverse order makes every insert
+  fail on unknown columns.
+- **Re-importing a workflow updates the existing one.** Never add a second copy —
+  duplicate webhook paths conflict and audits break silently.
+- **Code-only merges auto-deploy on Vercel. Env var changes need a manual redeploy.**
+- **Never hand-edit a workflow JSON, and never paste an n8n export over one.** They are
+  checked artifacts; `test_india.mjs` asserts byte equality between each node's
+  `jsCode` and its source file, and an export reintroduces `pinData`.
+- **Never rename a node in the n8n UI.** Two Code nodes reach for `VALIDATE_Input` by
+  name; a UI-only rename breaks the happy path while leaving the reject path working,
+  so a 400 smoke test passes with full marks. Rename via `RENAMES` in
+  `scripts/patch_india_workflow.py`.
+- **Schema changes get numbered migrations. Function definitions do not.**
+  `scripts/db/functions/` holds the canonical `record_signoff()`; re-apply it whenever
+  it changes. Install order: `001`–`009` in order, then everything in `functions/`.
+
+## Traps that have already bitten this project
+
+Each of these is now guarded by an assertion. They are listed because the guard
+explains itself better with the history attached.
+
+1. **`CREATE OR REPLACE VIEW` can only append columns** — not reorder or rename. A
+   later migration redefining an earlier view must `DROP VIEW IF EXISTS` first.
+2. **A single-session test harness cannot observe a race.** 44 green assertions passed
+   against a `record_signoff()` whose double-signing guard could be defeated by
+   concurrency.
+3. **Caller-supplied fields are not scopes.** `site_id` is caller-supplied, which is
+   why `org_id` exists and why both `VALIDATE_Input` nodes ignore it in the request
+   body.
+4. **The committed artifact and the live workflow can diverge.** Both have happened —
+   a stale workflow name, and a UI-only node rename.
+5. **`new URL()` throws in the n8n Code node.** The offline harnesses shadow `URL`,
+   `Buffer`, `process` and `fetch` as undefined to reproduce that.
+6. **Telegram rejects the whole message on an unsupported HTML tag.** The email
+   renderer's `<li>`/`<div style>` must never reach the Telegram body.
+7. **Ask both questions before a data migration.** "Will anything collide?" and "is
+   anything un-normalised?" are different questions; migration 005 was predicted as a
+   no-op and changed 3 rows.
+
+## Reading order
+
+1. this section
+2. [`docs/IND_FIRE_AUDIT_WORKFLOW.md`](docs/IND_FIRE_AUDIT_WORKFLOW.md) — India §7 roadmap, §8 current state
+3. [`docs/US_FIRE_AUDIT_WORKFLOW.md`](docs/US_FIRE_AUDIT_WORKFLOW.md) — US §11 roadmap, §12 limitations
+4. [`docs/SIGNOFF_DESIGN.md`](docs/SIGNOFF_DESIGN.md) — the sign-off arc. §14 reviews §1–§13 against the real schema; §16 records what is untested; §17 settles tenancy
+
+Brand is locked: **KRATU AI Labs**, product **AQUILA**, tagline *"Intelligence,
+Engineered to Act."* — exact casing, keep the period. Constants in `lib/brand.ts`.
+
+---
 
 ## n8n audit workflows
 

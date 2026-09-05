@@ -932,6 +932,7 @@ These are not India-specific — see the US document for detail:
 | `audit_timestamp` column type | ✅ `timestamptz` (migration 006) — Form B date ranges now possible |
 | Minted `audit_id` | ✅ `FA-IN-…` minted in `VALIDATE_Input`; historical rows backfilled `FA-INB-…` (006) |
 | Sign-off columns + write path | ✅ `field_audit_signoffs`, append-only, atomic and row-locked `record_signoff()` (007 + 008) |
+| Tenant scoping (`org_id`) | ⚠️ column exists (009) but **nothing populates it and no read filters on it** — not multi-tenant-safe (SIGNOFF_DESIGN §17.4) |
 | Form B evidence pack | ❌ needs `compliance_periods` + confirmed `IN-MH` registry + prescribed wording (7.9) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
