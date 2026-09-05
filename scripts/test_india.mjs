@@ -402,6 +402,33 @@ section('1d. Minted audit_id (migration 006)');
 }
 
 // ===========================================================================
+section('1e. org_id is never caller-supplied (migration 009)');
+{
+  // site_id is caller-supplied, and that is precisely why 009 exists. Accepting
+  // org_id the same way would let a caller file into — or later read — another
+  // tenant's data.
+  const spoofed = runPipeline({
+    ...BODY, org_id: 'ORG-SOMEONE-ELSE', organisation_id: 'ORG-SOMEONE-ELSE',
+    tenant_id: 'ORG-SOMEONE-ELSE'
+  }, reply([]));
+
+  check('org_id in the body is ignored, not honoured',
+    spoofed.input.org_id === undefined, String(spoofed.input.org_id));
+  check('no alias of it is honoured either',
+    spoofed.input.organisation_id === undefined && spoofed.input.tenant_id === undefined);
+  check('a spoofed tenant scope reaches nothing downstream',
+    JSON.stringify(spoofed.input).indexOf('SOMEONE-ELSE') === -1 &&
+    JSON.stringify(spoofed.derived).indexOf('SOMEONE-ELSE') === -1 &&
+    JSON.stringify(spoofed.response).indexOf('SOMEONE-ELSE') === -1);
+  // Ignored rather than rejected: refusing would confirm the field is meaningful and
+  // invite probing, and no legitimate caller sends it.
+  check('sending it is not an error, it simply has no effect',
+    spoofed.rejected === undefined && spoofed.input.validation_ok === true);
+  check('the audit still succeeds normally alongside the ignored field',
+    spoofed.response.status !== undefined && spoofed.response.audit_id !== null);
+}
+
+// ===========================================================================
 section('2. BUILD_Vision_Payload — the prompt');
 {
   const p = runPipeline(BODY, reply([])).payload;

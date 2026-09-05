@@ -190,6 +190,30 @@ const site_id = site_id_raw.toUpperCase().slice(0, 64);
 const asset_tag = clean(body.asset_tag, '', 64) || null;
 
 // ---------------------------------------------------------------------------
+// org_id IS NOT READ FROM THE BODY — EVER
+// ---------------------------------------------------------------------------
+// Migration 009 added org_id to the audit tables as the tenant scope. It is
+// deliberately absent from everything this node returns, and the omission is the
+// point rather than an oversight.
+//
+// site_id is caller-supplied, and that is exactly why 009 was needed: a value the
+// requester chooses cannot isolate one customer's records from another's. Accepting
+// org_id the same way would hand a caller the ability to file an audit into, or
+// later read, another tenant's data — the single worst thing this input node could
+// do.
+//
+// When authentication ships (SIGNOFF_DESIGN §11 step 4) the chain is:
+//   authenticated session -> /api/audit resolves the org -> proxy sends it -> here
+// and it will arrive somewhere a caller cannot forge, not in the request body.
+//
+// Until then org_id stays NULL on new rows, which is honest: nothing yet knows
+// which organisation an audit belongs to.
+//
+// No error is raised for a body that contains org_id. A rejection would leak that
+// the field is meaningful and invite probing at it, and there is no legitimate
+// caller to correct — the dashboard does not send it. It is simply not read.
+
+// ---------------------------------------------------------------------------
 // IDENTITY — a minted audit_id (migration 006)
 // ---------------------------------------------------------------------------
 // India had no minted identifier: the table is keyed on `id`, a serial the

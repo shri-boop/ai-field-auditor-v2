@@ -314,9 +314,12 @@ SELECT lpad(id::text, 3) || '  ' ||
 FROM _v ORDER BY id;
 
 \echo ''
-SELECT 'RESULT: ' || count(*) FILTER (WHERE ok) || ' passed, '
-                   || count(*) FILTER (WHERE NOT ok) || ' failed' AS summary
-FROM _v;
+SELECT count(*) FILTER (WHERE ok) || ' passed, ' || count(*) FILTER (WHERE NOT ok) || ' failed'
+       AS tally FROM _v;
+SELECT CASE WHEN count(*) FILTER (WHERE NOT ok) = 0
+            THEN 'VERDICT: OK'
+            ELSE 'VERDICT: FAILED — ' || count(*) FILTER (WHERE NOT ok) || ' assertion(s) above' END
+       AS verdict FROM _v;
 \echo ''
 
 -- Nothing is kept. Every scratch audit row and every signoff row created above

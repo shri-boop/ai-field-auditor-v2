@@ -135,7 +135,31 @@ function clean(value, fallback, maxLength) {
   return (out || fallback).slice(0, maxLength || 64);
 }
 
-const site_id = clean(body.site_id, 'UNKNOWN-SITE', 64).toUpperCase();
+// site_id is REQUIRED. The 'UNKNOWN-SITE' default this line used to carry became
+// unreachable when /api/audit began rejecting an empty site_id for both regions, and
+// is now removed — the queued cleanup noted in US doc §11.6, shipping with the
+// re-import migration 009 requires anyway.
+//
+// Same reasoning as the India node: an audit that is not attached to a building
+// cannot be retrieved by Records, billed, or included in a statutory pack, and it
+// costs a paid vision call to produce. Defaulting invented a building that does not
+// exist; refusing is honest.
+//
+// This also closes the gap where a caller reaching the webhook directly — bypassing
+// the proxy that now rejects it — could still file an unattached audit.
+const site_id_raw = String(body.site_id === undefined || body.site_id === null ? '' : body.site_id).trim();
+if (!site_id_raw) {
+  return reject(
+    'SITE_ID_MISSING',
+    '"site_id" is required. An audit that is not attached to a site cannot be retrieved, billed, or included in a compliance record.',
+    body.site_id
+  );
+}
+const site_id = site_id_raw.toUpperCase().slice(0, 64);
+
+// org_id is NOT read from the body, for the reasons set out at length in the India
+// node (scripts/nodes/ind_01_validate_input.js). A caller-chosen tenant scope is not
+// a scope. It arrives from the authenticated proxy once step 4 ships.
 const jurisdiction = clean(body.jurisdiction || body.state, 'US-DEFAULT', 16).toUpperCase();
 const occupancy_type = clean(body.occupancy_type, 'BUSINESS', 48).toUpperCase();
 const equipment_hint = clean(body.equipment_hint, 'AUTO', 48).toUpperCase().replace(/[\s-]+/g, '_');

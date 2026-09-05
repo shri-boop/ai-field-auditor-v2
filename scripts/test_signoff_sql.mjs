@@ -32,7 +32,10 @@ const REPO = dirname(HERE);
 const MIG = readFileSync(join(REPO, 'scripts', 'db', '007_field_audit_signoffs.sql'), 'utf8');
 const VER = readFileSync(join(REPO, 'scripts', 'db', '007_verify.sql'), 'utf8');
 const LOCK = readFileSync(join(REPO, 'scripts', 'db', '008_record_signoff_row_lock.sql'), 'utf8');
-const LOCKVER = readFileSync(join(REPO, 'scripts', 'db', '008_verify.sql'), 'utf8');
+const FN = readFileSync(join(REPO, 'scripts', 'db', 'functions', 'record_signoff.sql'), 'utf8');
+const FNVER = readFileSync(join(REPO, 'scripts', 'db', 'functions', 'record_signoff_verify.sql'), 'utf8');
+const ORG = readFileSync(join(REPO, 'scripts', 'db', '009_org_scoping.sql'), 'utf8');
+const ORGVER = readFileSync(join(REPO, 'scripts', 'db', '009_verify.sql'), 'utf8');
 const DESIGN = readFileSync(join(REPO, 'docs', 'SIGNOFF_DESIGN.md'), 'utf8');
 
 let pass = 0, fail = 0;
@@ -298,27 +301,92 @@ section('9. Migration 008 — the row lock, and 007 marked superseded');
     /008_record_signoff_row_lock\.sql/.test(MIG));
 
   // The deployed function, not the file on disk, is what runs.
-  check('008_verify inspects the DEPLOYED function, not the file',
-    /pg_get_functiondef/.test(LOCKVER));
-  check('008_verify checks both locks are present',
-    /BOTH audit reads/.test(LOCKVER));
-  check('008_verify re-checks the guards survived',
-    /survived/.test(LOCKVER));
-  check('008_verify documents the two-session race procedure it cannot run',
-    /TWO psql sessions/.test(LOCKVER) && /BLOCKS, waiting on the row lock/.test(LOCKVER));
-  check('008_verify is read-only apart from a rolled-back transaction',
-    /^ROLLBACK;/m.test(LOCKVER) && /^COMMIT;/m.test(LOCKVER) === false);
+  check('the canonical verifier inspects the DEPLOYED function, not the file',
+    /pg_get_functiondef/.test(FNVER));
+  check('it checks both locks are present',
+    /BOTH audit reads/.test(FNVER));
+  check('it re-checks the guards survived',
+    /survived/.test(FNVER));
+  check('it documents the two-session race procedure it cannot run',
+    /TWO psql sessions/.test(FNVER) && /BLOCKS, waiting on the row lock/.test(FNVER));
+  check('it is read-only apart from a rolled-back transaction',
+    /^ROLLBACK;/m.test(FNVER) && /^COMMIT;/m.test(FNVER) === false);
 
   // Cosmetic, but a bracketed detail beside a PASS reads like a warning.
   check('both verify scripts report detail only on failure',
     /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(VER) &&
-    /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(LOCKVER));
+    /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(FNVER));
+}
+
+// ===========================================================================
+section('10. Migration 009 \u2014 org scoping, and the canonical function home');
+{
+  check('all three tables gain org_id',
+    /field_audit_us_logs\s+ADD COLUMN IF NOT EXISTS org_id/.test(ORG) &&
+    /field_audit_logs\s+ADD COLUMN IF NOT EXISTS org_id/.test(ORG) &&
+    /field_audit_signoffs\s+ADD COLUMN IF NOT EXISTS org_id/.test(ORG));
+  // NOT NULL now would fail every insert until auth ships.
+  check('org_id is NOT declared NOT NULL yet, and says why',
+    /org_id text NOT NULL/.test(ORG) === false && /cannot be populated yet/.test(ORG));
+  check('existing rows are backfilled to a visibly-internal sentinel',
+    /ORG-KRATU-INTERNAL/.test(ORG));
+  check('a blank org_id is refused, since it looks scoped and matches nothing',
+    /org_id_not_blank/.test(ORG));
+  check('org-leading indexes exist, so a scoped query is not a full scan',
+    /idx_fal_org_time/.test(ORG) && /idx_faus_org_time/.test(ORG));
+  check('the tenancy model is written down, not left to be rediscovered',
+    /Shared database, row-level scoping by org_id/.test(ORG));
+  check('the snapshot-versus-reference distinction is stated',
+    /Snapshot what was[\s\S]{0,12}attested; reference what is merely scoped/.test(ORG));
+  check('the never-caller-supplied rule is stated in the migration',
+    /MUST NEVER BE CALLER-SUPPLIED/.test(ORG));
+
+  // The canonical function home.
+  check('there is a single canonical function definition',
+    /THIS FILE IS THE CURRENT FUNCTION/.test(FN));
+  check('it explains why it sits outside the numbered migrations',
+    /three near-identical/.test(FN));
+  check('it documents the install order',
+    /INSTALL ORDER/.test(FN));
+  check('it retains both row locks', (FN.match(/FOR UPDATE;/g) || []).length === 2);
+  check('org_id is read from the audit row, never a parameter',
+    /v_org_id/.test(FN) && /p_org_id/.test(FN) === false);
+  check('org_id is written onto the signoff row',
+    FN.indexOf('v_org_id,') > FN.indexOf('INSERT INTO field_audit_signoffs'));
+  check('the earlier copies are both marked superseded',
+    /SUPERSEDED BY MIGRATION 008/.test(MIG) &&
+    /SUPERSEDED BY scripts\/db\/functions\/record_signoff\.sql/.test(LOCK));
+
+  // Every guard must survive each full-body replacement.
+  [
+    ['catch-all refusal', /is not permitted/],
+    ['SUPERVISOR requirement', /requires SUPERVISOR/],
+    ['role gate', /may not sign/],
+    ['bulk CRITICAL guard', /one at a time/],
+    ['expired-credential guard', /lapsed certificate/],
+    ['SELF_DECLARED guard', /SELF_DECLARED is the absence of/],
+    ['FIRM licence guard', /firm licence number is required/],
+    ['stale-verification guard', /fell due for review/]
+  ].forEach(function (pair) {
+    check('the ' + pair[0] + ' survived into the canonical file', pair[1].test(FN));
+  });
+
+  // The stale-count mistake, fixed structurally.
+  check('every verify script prints a VERDICT instead of a count to match',
+    /VERDICT: OK/.test(VER) && /VERDICT: OK/.test(FNVER) && /VERDICT: OK/.test(ORGVER));
+  check('and the reason is recorded so it is not reintroduced',
+    /stale expectation|ignore a genuine failure|how people learn to ignore/.test(VER + FNVER + ORGVER));
+  check('009_verify is read-only apart from a rolled-back transaction',
+    /^ROLLBACK;/m.test(ORGVER) && /^COMMIT;/m.test(ORGVER) === false);
+  check('009_verify warns against adding NOT NULL prematurely',
+    /Do not add NOT NULL before then/.test(ORGVER));
 }
 
 console.log('\n' + '='.repeat(64));
 console.log('PASS: ' + pass + '   FAIL: ' + fail);
 if (fail) { console.log('\nFAILURES'); failures.forEach((f) => console.log('  - ' + f)); }
 console.log('='.repeat(64));
-console.log('NOTE: this file does not execute SQL. Run 007_verify.sql and');
-console.log('      008_verify.sql against Postgres — those are the real tests.');
+console.log('NOTE: this file does not execute SQL. The real tests are');
+console.log('      007_verify.sql, 009_verify.sql and');
+console.log('      functions/record_signoff_verify.sql, against Postgres.');
 process.exit(fail === 0 ? 0 : 1);
