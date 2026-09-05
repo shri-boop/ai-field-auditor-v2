@@ -353,6 +353,55 @@ section('1c. site_id is required and normalised');
 }
 
 // ===========================================================================
+section('1d. Minted audit_id (migration 006)');
+{
+  const r = runPipeline(BODY, reply([]));
+
+  // FA-IN- means minted at audit time. Migration 006 backfilled pre-existing rows
+  // as FA-INB-, and nothing in the workflow may ever emit that prefix — a
+  // retroactively derived identifier must stay distinguishable from a real one.
+  check('audit_id is minted with the India prefix',
+    /^FA-IN-\d{8}-[0-9A-F]{8}-[0-9A-Z]{5}$/.test(r.input.audit_id), r.input.audit_id);
+  check('the workflow never emits the backfill prefix FA-INB-',
+    r.input.audit_id.startsWith('FA-INB-') === false, r.input.audit_id);
+  check('the format matches the US shape, so one parser reads both regions',
+    r.input.audit_id.split('-').length === 5);
+
+  // It is minted before the vision call so it survives every exit, including the
+  // ones where the model never answered.
+  check('audit_id reaches the derived verdict', r.derived.audit_id === r.input.audit_id);
+  check('audit_id reaches the response', r.response.audit_id === r.input.audit_id);
+  check('audit_id is no longer hardcoded null in the response',
+    r.response.audit_id !== null);
+
+  // The reason it is minted in VALIDATE_Input rather than after the model returns.
+  const broken = runPipeline(BODY, 'not json at all');
+  check('audit_id survives a malformed model reply',
+    typeof broken.response.audit_id === 'string' && broken.response.audit_id.length > 0,
+    String(broken.response.audit_id));
+  const dbDown = runPipeline(BODY, reply([]), { dbFails: true });
+  check('audit_id survives a database failure, unlike record_id',
+    typeof dbDown.response.audit_id === 'string' && dbDown.response.record_id === null,
+    dbDown.response.audit_id + ' / ' + dbDown.response.record_id);
+  check('audit_id and record_id answer different questions and both persist in the contract',
+    'audit_id' in dbDown.response && 'record_id' in dbDown.response);
+
+  // Stability: same device, same photo -> same idempotency component.
+  const again = runPipeline(BODY, reply([]));
+  check('idempotency_key is stable for identical input',
+    r.input.idempotency_key === again.input.idempotency_key);
+  check('idempotency_key changes when the device changes',
+    runPipeline({ ...BODY, asset_tag: 'EXT-999-99' }, reply([])).input.idempotency_key !==
+    r.input.idempotency_key);
+  check('two audits of the same device still get distinct audit_ids',
+    r.input.audit_id !== again.input.audit_id);
+
+  // A rejected request must not mint one: no audit happened.
+  const rejected = runPipeline({ image_url: BODY.image_url }, reply([])).rejected;
+  check('a rejected request mints no audit_id', rejected.audit_id === undefined);
+}
+
+// ===========================================================================
 section('2. BUILD_Vision_Payload — the prompt');
 {
   const p = runPipeline(BODY, reply([])).payload;
@@ -567,7 +616,11 @@ section('7. SHAPE_Response — a DB outage must not swallow a finding (roadmap 7
   const ok = runPipeline(BODY, reply([DEF_MAJOR])).response;
   check('a successful write reports persisted: true', ok.persisted === true);
   check('the row id becomes record_id, so the record is addressable', ok.record_id === 4711);
-  check('audit_id is null — India mints none', ok.audit_id === null);
+  // Was: "audit_id is null — India mints none". Migration 006 gave India a minted
+  // identifier, because field_audit_signoffs references one and a Form B evidence
+  // pack has to cite the audits behind it (SIGNOFF_DESIGN §14.1).
+  check('audit_id is minted and sits alongside record_id, not instead of it',
+    /^FA-IN-/.test(ok.audit_id) && ok.record_id === 4711, ok.audit_id);
 
   const down = runPipeline(BODY, reply([DEF_CRITICAL]), { dbFails: true });
   check('a DB failure still produces a verdict', down.response.status === 'NON-COMPLIANT');
@@ -896,6 +949,12 @@ section('9. AI_Field_Audit_v2.json wiring');
     JSON.stringify(by.IF_NonCompliant).indexOf('NON-COMPLIANT') === -1);
 
   const cols = by.LOG_Audit.parameters.columns.value;
+  // migration 006
+  check('LOG_Audit persists audit_id', cols.audit_id === '={{ $json.audit_id }}', cols.audit_id);
+  check('audit_timestamp is still written as an explicit ISO-8601 string',
+    cols.audit_timestamp === '={{ $json.audit_timestamp }}', cols.audit_timestamp);
+  check('every mapped column still has a schema entry after adding audit_id',
+    by.LOG_Audit.parameters.columns.schema.some(function (e) { return e.id === 'audit_id'; }));
   ['deficiencies', 'unverifiable_items', 'reinspect_reasons', 'critical',
    'critical_count', 'major_count', 'minor_count', 'deficiency_count',
    'risk_score', 'image_quality', 'reinspect_required'].forEach(function (c) {

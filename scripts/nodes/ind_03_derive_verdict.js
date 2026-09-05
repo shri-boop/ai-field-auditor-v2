@@ -38,6 +38,9 @@ const audit_timestamp = new Date().toISOString();
 /** Shared shape so every exit from this node returns the same fields. */
 function base(extra) {
   const out = {
+    // Minted in VALIDATE_Input, before the vision call, so it survives every exit
+    // from this node including SYSTEM_ERROR. Migration 006; SIGNOFF_DESIGN §14.1.
+    audit_id: source.audit_id || null,
     site_id: payloadMeta.site_id || source.site_id || 'unknown',
     asset_tag: source.asset_tag || null,
     inspector_id: source.inspector_id || 'UNASSIGNED',

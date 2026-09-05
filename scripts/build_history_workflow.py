@@ -77,27 +77,39 @@ LIMIT $7::int OFFSET $8::int"""
 #
 #   id integer PK | equipment_type text | status text | confidence text
 #   observations text | violations text | site_id text
-#   audit_timestamp TEXT  <-- not a timestamp type
+#   audit_timestamp timestamptz  <-- was TEXT until migration 006
+#   audit_id text                <-- added by migration 006
 #   created_at timestamptz DEFAULT now()
 #
-# ⚠️ RANGE FILTERING USES created_at, NOT audit_timestamp.
-# audit_timestamp is a text column. `text >= timestamptz` has no operator in
-# Postgres, so filtering it against a typed parameter raises
-# "operator does not exist: text >= timestamp with time zone". Casting the column
-# per row would work but would discard any index and would explode on a single
-# malformed value.
+# RANGE FILTERING STILL USES created_at, AND THAT IS NOW A CHOICE RATHER THAN A
+# CONSTRAINT.
 #
-# created_at is a real timestamptz, written by DEFAULT now() in the same
-# statement that sets audit_timestamp, so for range purposes they are the same
-# instant. ORDER BY uses it too: ordering by the text column only appears correct
-# because every value happens to be a fixed-width ISO-8601 Z string, which makes
-# lexicographic order match chronological order — true today, silently wrong the
-# first time anything writes a different format.
+# It used to be forced: audit_timestamp was a text column, `text >= timestamptz`
+# has no operator in Postgres, and casting per row would have discarded any index
+# and exploded on a single malformed value.
+#
+# Migration 006 converted the column to timestamptz, so filtering on it is now
+# possible. The query is deliberately left on created_at anyway:
+#
+#   * the two are written in the same INSERT — created_at by DEFAULT now(),
+#     audit_timestamp by the workflow — so they are the same instant for range
+#     purposes, and switching would change no result a user sees
+#   * changing this query would rebuild AI_Field_Audit_History.json and cost a
+#     history workflow re-import to produce identical output
+#
+# Form B is the case that will justify the switch, because a half-yearly evidence
+# pack is defined by when the AUDIT happened, not when the row was inserted, and
+# those can differ if an audit is ever replayed or imported. Migration 006 added
+# (site_id, audit_timestamp DESC) ready for exactly that query — see
+# SIGNOFF_DESIGN §14.4. Do it when compliance_periods is built, in the same
+# re-import.
 #
 # audit_timestamp is still SELECTed, because it is what the record should display.
 #
-# There is no audit_id or asset_tag column, so those filters are rejected for IND
-# rather than ignored. There IS a primary key — id — exposed as record_id.
+# There is no asset_tag-based audit_id filter for IND. audit_id EXISTS as of
+# migration 006 but is not yet a filterable parameter here — adding it is a query
+# change and therefore a re-import, deferred to the same batch as the above.
+# There IS a primary key — id — exposed as record_id.
 # asset_tag, inspector_id and image_url were added by migration 003. Rows written
 # before it have NULL in all three, so the UI must treat them as optional — an
 # India record from before the migration has no evidence photo.

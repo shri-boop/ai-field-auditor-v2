@@ -167,7 +167,20 @@ COLUMNS = {
     "observations": ("={{ $json.observations }}", "string"),
     "violations": ("={{ JSON.stringify($json.violations) }}", "string"),
     "site_id": ("={{ $json.site_id }}", "string"),
+    # migration 006 — audit_timestamp is now timestamptz, not text.
+    #
+    # The mapped TYPE stays "string" deliberately. DERIVE_Verdict emits
+    # `new Date().toISOString()`, which is ISO-8601 with an explicit trailing Z, and
+    # Postgres casts that to timestamptz unambiguously. Switching the mapping to
+    # n8n's "dateTime" would hand the formatting to n8n instead, and n8n's date
+    # coercion is not something this repo can test offline — the whole harness exists
+    # because untestable assumptions about the n8n runtime have bitten before.
+    #
+    # A value that is already correct and explicitly UTC does not need a second
+    # opinion about its timezone.
     "audit_timestamp": ("={{ $json.audit_timestamp }}", "string"),
+    # migration 006 — the minted identifier field_audit_signoffs will reference.
+    "audit_id": ("={{ $json.audit_id }}", "string"),
     # migration 003
     "asset_tag": ("={{ $json.asset_tag }}", "string"),
     "inspector_id": ("={{ $json.inspector_id }}", "string"),
@@ -575,8 +588,9 @@ def main():
            + "ms, maxTries=3, falls back to " + FALLBACK_MODEL + " (7.6)")
     print()
     print("NEXT, IN THIS ORDER:")
-    print("  1. Apply scripts/db/005_field_audit_logs_site_id.sql")
-    print("     (normalises site_id; expected to report 0 rows changed)")
+    print("  1. Apply scripts/db/006_field_audit_logs_audit_id_and_timestamp.sql")
+    print("     (adds audit_id, converts audit_timestamp to timestamptz;")
+    print("      aborts if any existing timestamp will not cast)")
     print("  2. Re-import this file into n8n, UPDATING the existing workflow")
     print("     (a second copy would fight over /webhook/audit-field-photov2)")
     print("  3. Confirm the validator node reads VALIDATE_Input on the canvas.")
