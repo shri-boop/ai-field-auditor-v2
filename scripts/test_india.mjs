@@ -689,15 +689,35 @@ section('8. BUILD_Alert');
   check('the subject leads with the severity, not the site',
     /AQUILA IND \u2014 CRITICAL:/.test(crit.email_subject));
   check('the action text says to attend now', /Attend the site now/.test(crit.telegram_message));
+  // Telegram is posted with parse_mode: HTML and now actually carries markup.
+  // Previously it carried none, which is why a long REINSPECT rendered as a wall.
   check('the severity line replaces the undifferentiated verdict',
-    /Severity    : 1 CRITICAL/.test(crit.telegram_message));
-  check('the risk score is shown', /Risk score  : 100\/100/.test(crit.telegram_message));
+    /<b>Severity:<\/b> 1 CRITICAL/.test(crit.telegram_message), crit.telegram_message.slice(0, 400));
+  check('the risk score is shown', /<b>Risk:<\/b> 100\/100/.test(crit.telegram_message));
   check('the asset tag is shown, so the van knows which device',
-    /Asset       : EXT-401-02/.test(crit.telegram_message));
+    /<b>Asset:<\/b> <code>EXT-401-02<\/code>/.test(crit.telegram_message));
   check('the code reference travels with the finding',
-    /Code: IS 2190/.test(crit.telegram_message));
+    /IS 2190/.test(crit.telegram_message));
   check('the remediation travels with the finding',
-    /Fix:  Withdraw and refill/.test(crit.telegram_message));
+    /<b>Fix:<\/b> Withdraw and refill/.test(crit.telegram_message));
+  check('the minted audit_id is quotable from the alert',
+    /<b>Audit:<\/b> <code>FA-IN-/.test(crit.telegram_message));
+  check('labels are bold, so the header has hierarchy on a phone',
+    (crit.telegram_message.match(/<b>/g) || []).length >= 8,
+    String((crit.telegram_message.match(/<b>/g) || []).length));
+
+  // Telegram HTML accepts only b/i/u/s/code/pre/a/blockquote/tg-spoiler. An
+  // unsupported tag does not degrade — Telegram rejects the whole message, so the
+  // alert is lost. The email renderer's <li> and <div style> must never leak here.
+  check('no email-only markup leaks into the Telegram body',
+    /<li|<div|<ul|<table|style=/.test(crit.telegram_message) === false,
+    (crit.telegram_message.match(/<li|<div|<ul|<table|style=/) || [''])[0]);
+  const allowed = (crit.telegram_message.match(/<\/?([a-zA-Z-]+)/g) || [])
+    .map(function (t) { return t.replace(/<\/?/, '').toLowerCase(); });
+  check('every tag used is on Telegram\'s supported list',
+    allowed.every(function (t) {
+      return ['b', 'i', 'u', 's', 'code', 'pre', 'a', 'blockquote', 'tg-spoiler'].indexOf(t) !== -1;
+    }), allowed.join(','));
 
   const minor = runPipeline(BODY, reply([DEF_MINOR])).alert;
   check('a MINOR-only audit is framed as not a failure',
@@ -707,7 +727,7 @@ section('8. BUILD_Alert');
 
   const re = runPipeline(BODY, reply([], { confidence: 'LOW' })).alert;
   check('REINSPECT explains why rather than listing findings',
-    /WHY REINSPECTION IS NEEDED/.test(re.telegram_message));
+    /<b>Why reinspection is needed:<\/b>/.test(re.telegram_message), re.telegram_message.slice(0, 300));
   check('REINSPECT warns against recording it as a pass',
     /do not record this as a pass/.test(re.telegram_message));
 
@@ -728,7 +748,9 @@ section('8. BUILD_Alert');
   check('Slack escapes the same characters', /&lt;cracked&gt;/.test(nasty.slack_message));
   check('the email body escapes them too', /&lt;cracked&gt;/.test(nasty.email_html));
   check('escaping does not eat our own formatting',
-    /\u2501{10}/.test(nasty.telegram_message));
+    /<b>/.test(nasty.telegram_message) && /&lt;cracked&gt;/.test(nasty.telegram_message));
+  check('the plain-text alert field still carries the rule, for non-HTML consumers',
+    /\u2501{10}/.test(nasty.alert));
 
   check('the footer is KRATU AI Labs, not the old company',
     /KRATU AI Labs/.test(crit.telegram_message) &&
@@ -751,8 +773,64 @@ section('8. BUILD_Alert');
     unverifiable_items: ['Refill date not legible']
   })).alert;
   check('items that could not be verified are surfaced, not silently dropped',
-    /Could not be verified from the photograph: Refill date not legible/
-      .test(unver.telegram_message));
+    /Could not be verified from the photograph/.test(unver.telegram_message) &&
+    /Refill date not legible/.test(unver.telegram_message));
+
+  // ---------------------------------------------------------------------------
+  // The regression this section exists for: a real seven-item REINSPECT.
+  //
+  // These used to be flattened with join('; ') into ONE line inside the caveat
+  // block, which on a REINSPECT is the entire substance of the message. Seven
+  // findings in one paragraph is unreadable exactly when the reader needs to know
+  // what to re-shoot.
+  // ---------------------------------------------------------------------------
+  const REAL = [
+    'UNIT_MISSING_OR_DISCHARGED - Pressure gauge needle position cannot be read clearly enough in this photograph to confirm it is in the green operable range',
+    'SEAL_OR_PIN_COMPROMISED - Safety pin and tamper seal are not clearly visible in sufficient detail to verify their presence and integrity',
+    'REFILL_OR_EXPIRY_OVERDUE - Refill date, expiry date, and maintenance interval markings are not legible in this photograph',
+    'INSPECTION_TAG_MISSING - Inspection tag, maintenance card, or record of periodic inspection is not visible or legible in this photograph',
+    'MOUNTING_HEIGHT_WRONG - The floor level and full mounting arrangement are not visible',
+    'WRONG_CLASS_FOR_HAZARD - The specific occupancy hazard classification cannot be determined from this photograph alone',
+    'ISI_MARK_MISSING - The ISI/BIS certification mark location on the cylinder body is not visible or legible'
+  ];
+  const seven = runPipeline(BODY, reply([], {
+    confidence: 'LOW', unverifiable_items: REAL
+  })).alert;
+
+  const bulletLines = seven.telegram_message.split('\n')
+    .filter(function (l) { return l.indexOf('\u2022') === 0; });
+  check('all seven unverifiable items get their own line',
+    bulletLines.length >= 7, 'bullet lines: ' + bulletLines.length);
+  check('no line concatenates two findings with a semicolon',
+    seven.telegram_message.split('\n').every(function (l) {
+      return (l.match(/; [A-Z][A-Z0-9_]{2,} /g) || []).length === 0;
+    }));
+  check('the checklist code is kept, as a bold label rather than buried in prose',
+    /<b>UNIT_MISSING_OR_DISCHARGED<\/b> \u2014 Pressure gauge/.test(seven.telegram_message));
+  check('every one of the seven codes survives',
+    REAL.every(function (r) { return seven.telegram_message.indexOf(r.split(' - ')[0]) !== -1; }));
+  check('the prose survives intact, not truncated at the code boundary',
+    /green operable range/.test(seven.telegram_message) &&
+    /cylinder body is not visible or legible/.test(seven.telegram_message));
+  check('an item with no code prefix still renders as its own bullet',
+    /\u2022 Refill date not legible/.test(unver.telegram_message), 'plain item lost its bullet');
+
+  // Slack and email get the same promotion, so no channel keeps the old blob.
+  check('Slack also breaks the seven items onto separate lines',
+    seven.slack_message.split('\n').filter(function (l) { return l.indexOf('\u2022') === 0; }).length >= 7);
+  check('the email body renders one <li> per unverifiable item',
+    (seven.email_html.match(/<li[^>]*>\s*<strong>/g) || []).length >= 7,
+    String((seven.email_html.match(/<li[^>]*>\s*<strong>/g) || []).length));
+
+  // A NON-COMPLIANT still leads with its deficiencies; the promotion must not
+  // hijack the body of a status that has real findings.
+  const nc = runPipeline(BODY, reply([DEF_MAJOR], { unverifiable_items: REAL.slice(0, 2) })).alert;
+  check('NON-COMPLIANT still leads with Findings, not with the evidence gap',
+    nc.telegram_message.indexOf('<b>Findings:</b>') <
+    nc.telegram_message.indexOf('Could not be verified'),
+    'ordering wrong');
+  check('and it still shows the evidence gap further down',
+    /Could not be verified from the photograph/.test(nc.telegram_message));
 
   const drift = runPipeline(BODY, reply([
     { code: 'MADE_UP_CODE', severity: 'MAJOR', finding: 'x' }

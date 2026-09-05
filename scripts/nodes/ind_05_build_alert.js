@@ -32,6 +32,10 @@
 const a = $input.first().json;
 
 const status = a.status || 'UNKNOWN';
+// Minted by VALIDATE_Input as of migration 006. Worth a line of its own in the
+// alert: when someone forwards a Telegram message asking "what happened here?",
+// this is the only string that finds the row.
+const audit_id = a.audit_id || null;
 const site_id = a.site_id || 'unknown';
 const asset_tag = a.asset_tag || null;
 const equipment = a.equipment_type || 'Unknown Equipment';
@@ -87,6 +91,52 @@ function esc(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
+
+/**
+ * Splits a model-emitted item of the form "CHECKLIST_CODE - prose" into its two
+ * parts.
+ *
+ * The model prefixes unverifiable items with the checklist code it was reasoning
+ * about. That is genuinely useful to a technician who knows the checklist, and it
+ * is NOT stripped — but a bare SCREAMING_SNAKE_CASE token leading a sentence
+ * inside a run-on paragraph is what made these messages unreadable. Separating the
+ * two lets each channel present the code as a label and the prose as prose.
+ *
+ * Returns the whole string as `text` with a null `code` when there is no prefix,
+ * so an item is never dropped or truncated for failing to match a shape the model
+ * was never contractually required to produce.
+ */
+function splitCoded(item) {
+  const s = String(item === undefined || item === null ? '' : item).trim();
+  const m = s.match(/^([A-Z][A-Z0-9_]{2,})\s*[-\u2013\u2014:]\s+([\s\S]+)$/);
+  if (!m) return { code: null, text: s };
+  return { code: m[1], text: m[2].trim() };
+}
+
+/**
+ * ONE ITEM PER LINE, in every channel.
+ *
+ * These lists were previously flattened with `join('; ')` into a single line. For a
+ * REINSPECT that is the worst possible choice: the unverifiable items ARE the
+ * substance of the message — the answer to "why can't you judge this photograph?"
+ * — and seven of them concatenated into one paragraph is unreadable exactly when
+ * the reader most needs to act on it.
+ *
+ * `bullet` and `strong` are supplied per channel so the same structure renders as
+ * Telegram HTML, Slack mrkdwn, or plain text without three copies of this logic.
+ */
+function bulletise(items, bullet, strong) {
+  return items.map(function (item) {
+    const parts = splitCoded(item);
+    const text = esc(parts.text);
+    if (!parts.code) return bullet + ' ' + text;
+    return bullet + ' ' + strong(esc(parts.code)) + ' \u2014 ' + text;
+  }).join('\n');
+}
+
+const asHtml = function (s) { return '<b>' + s + '</b>'; };
+const asMrkdwn = function (s) { return '*' + s + '*'; };
+const asPlain = function (s) { return s; };
 
 const deficiencies = toArray(a.deficiencies).filter(function (d) {
   return d && typeof d === 'object';
@@ -159,6 +209,34 @@ function plainFindings() {
   }).join('\n');
 }
 
+/**
+ * Telegram findings.
+ *
+ * Deliberately NOT htmlFindings(): that renders `<li>` and `<div style="...">` for
+ * the email body, and Telegram's HTML parse mode accepts only a small tag set
+ * (b, i, u, s, code, pre, a, blockquote, tg-spoiler). An unsupported tag does not
+ * degrade — Telegram rejects the entire message with a parse error, so the alert
+ * would be lost completely. Reusing the email renderer here would have been worse
+ * than the unformatted wall of text it replaced.
+ *
+ * Severity leads, in <code>, because it is what decides whether someone gets in a
+ * van; the citation and the fix are indented continuation lines.
+ */
+function telegramFindings() {
+  if (deficiencies.length === 0) {
+    return violations.length
+      ? bulletise(violations, '\u2022', asHtml)
+      : '\u2022 None recorded';
+  }
+  return deficiencies.map(function (d) {
+    const head = '\u2022 <code>' + esc(String(d.severity || 'MAJOR').toUpperCase()) + '</code> '
+      + esc(d.finding || 'Unspecified finding.');
+    const ref = d.code_reference ? '\n    <i>' + esc(d.code_reference) + '</i>' : '';
+    const fix = d.remediation ? '\n    <b>Fix:</b> ' + esc(d.remediation) : '';
+    return head + ref + fix;
+  }).join('\n');
+}
+
 function slackFindings() {
   if (deficiencies.length === 0) {
     return violations.length
@@ -204,10 +282,8 @@ const caveats = [];
 if (!persisted) {
   caveats.push('NOT WRITTEN TO THE AUDIT DATABASE. This alert is the only copy of this finding \u2014 retain it.');
 }
-if (unverifiable.length) {
-  caveats.push('Could not be verified from the photograph: ' + unverifiable.map(esc).join('; '));
-}
 if (reinspect_reasons.length && status !== 'REINSPECT') {
+  // On a REINSPECT these are promoted into the body instead — see below.
   caveats.push('Reinspection flagged: ' + reinspect_reasons.map(esc).join('; '));
 }
 if (unknown_codes.length) {
@@ -215,14 +291,37 @@ if (unknown_codes.length) {
     + '). The prompt and the parser may have drifted.');
 }
 
+/**
+ * `unverifiable` is deliberately NOT a caveat any more.
+ *
+ * It was one, and it was flattened onto a single line with the other caveats. That
+ * mattered least on a NON-COMPLIANT, where the deficiencies carry the message, and
+ * most on a REINSPECT, where there are no deficiencies by definition and these
+ * items are the entire content: they say what the photograph failed to show. A
+ * REINSPECT alert whose only readable line was the generic "the automated pass
+ * flagged this photograph as inadequate to judge" told an ops manager nothing
+ * about what to re-shoot.
+ *
+ * It is now its own titled section with one item per line, on every channel.
+ */
+const UNVERIFIABLE_TITLE = 'Could not be verified from the photograph:';
+
+/** True when this status has no deficiency list to carry the message. */
+const bodyIsEvidenceGap = status === 'REINSPECT' && deficiencies.length === 0;
+
 const RULE = '\u2501'.repeat(30);
 const FOOTER = 'KRATU AI Labs \u00b7 AQUILA IND \u00b7 NBC 2016 Part 4, enforceable under MFPLSM Act 2006 / Rules 2009 \u00b7 AHJ: CFO, MCGM';
 const ADVISORY = 'Advisory screening from a photograph. Not a Form B certificate and not a substitute for inspection by a Licensed Agency.';
 
-// ------------------------------------------------------------ plain (Telegram)
+// ----------------------------------------------------------------- plain text
+/**
+ * Kept for the `alert` output field, which is plain text by contract. Telegram no
+ * longer uses it — it has its own HTML build below.
+ */
 const plainAlert = [
   emoji + ' ' + title,
   RULE,
+  audit_id ? 'Audit       : ' + esc(audit_id) : null,
   'Site        : ' + esc(site_id),
   asset_tag ? 'Asset       : ' + esc(asset_tag) : null,
   'Equipment   : ' + esc(equipment),
@@ -232,10 +331,13 @@ const plainAlert = [
   'Confidence  : ' + esc(confidence) + '   Image: ' + esc(image_quality),
   'Time (IST)  : ' + esc(indiaTime),
   '',
-  status === 'REINSPECT' ? 'WHY REINSPECTION IS NEEDED:' : 'FINDINGS:',
-  status === 'REINSPECT' && reinspect_reasons.length
-    ? reinspect_reasons.map(function (r, i) { return (i + 1) + '. ' + esc(r); }).join('\n')
+  bodyIsEvidenceGap ? 'WHY REINSPECTION IS NEEDED:' : 'FINDINGS:',
+  bodyIsEvidenceGap && reinspect_reasons.length
+    ? bulletise(reinspect_reasons, '\u2022', asPlain)
     : plainFindings(),
+  unverifiable.length ? '' : null,
+  unverifiable.length ? UNVERIFIABLE_TITLE : null,
+  unverifiable.length ? bulletise(unverifiable, '\u2022', asPlain) : null,
   caveats.length ? '' : null,
   caveats.length ? caveats.map(function (c) { return '! ' + c; }).join('\n') : null,
   RULE,
@@ -243,10 +345,56 @@ const plainAlert = [
   ADVISORY
 ].filter(function (line) { return line !== null; }).join('\n');
 
+// ------------------------------------------------------------------- Telegram
+/**
+ * SEND_Telegram posts with parse_mode: HTML, and until now this message contained
+ * no HTML at all — every value was escaped (correctly, so an "&" could not break
+ * the send) but nothing was ever marked up. The result rendered as one
+ * undifferentiated wall of text with no visual hierarchy, which is what made a
+ * seven-item REINSPECT unreadable.
+ *
+ * Structured the same way as the US notifier (scripts/nodes/06_build_report.js):
+ * bold labels, <code> for identifiers so they are tap-to-copy in Telegram, a blank
+ * line between the header block and the body, and one bullet per line.
+ *
+ * The header stays label-per-line rather than combining fields, because this is
+ * read on a phone in the field where a narrow column wraps anything longer.
+ */
+const telegramAlert = [
+  emoji + ' <b>' + esc(title) + '</b>',
+  '',
+  audit_id ? '<b>Audit:</b> <code>' + esc(audit_id) + '</code>' : null,
+  '<b>Site:</b> <code>' + esc(site_id) + '</code>',
+  asset_tag ? '<b>Asset:</b> <code>' + esc(asset_tag) + '</code>' : null,
+  '<b>Equipment:</b> ' + esc(equipment),
+  '<b>Status:</b> <code>' + esc(status) + '</code>'
+    + (critical_count > 0 ? ' \u26a0\ufe0f' : ''),
+  '<b>Severity:</b> ' + severityLine
+    + (risk_score !== null ? '   <b>Risk:</b> ' + risk_score + '/100' : ''),
+  '<b>Confidence:</b> ' + esc(confidence) + ' | <b>Image:</b> ' + esc(image_quality),
+  '<b>Time (IST):</b> ' + esc(indiaTime),
+  '',
+  '<b>' + (bodyIsEvidenceGap ? 'Why reinspection is needed' : 'Findings') + ':</b>',
+  bodyIsEvidenceGap && reinspect_reasons.length
+    ? bulletise(reinspect_reasons, '\u2022', asHtml)
+    : telegramFindings(),
+  unverifiable.length ? '' : null,
+  unverifiable.length ? '<b>' + UNVERIFIABLE_TITLE + '</b>' : null,
+  unverifiable.length ? bulletise(unverifiable, '\u2022', asHtml) : null,
+  caveats.length ? '' : null,
+  caveats.length
+    ? caveats.map(function (c) { return '\u26a0\ufe0f ' + c; }).join('\n')
+    : null,
+  '',
+  '<b>Action:</b> ' + esc(actionText),
+  '<i>' + esc(ADVISORY) + '</i>'
+].filter(function (line) { return line !== null; }).join('\n');
+
 // ------------------------------------------------------------------- Slack
 const slackAlert = [
   ':fire: *' + esc(title) + '*',
   RULE,
+  audit_id ? '*Audit:* `' + esc(audit_id) + '`' : null,
   '*Site:* `' + esc(site_id) + '`' + (asset_tag ? '   *Asset:* `' + esc(asset_tag) + '`' : ''),
   '*Equipment:* ' + esc(equipment),
   '*Status:* `' + esc(status) + '`   *Severity:* ' + severityLine
@@ -254,10 +402,13 @@ const slackAlert = [
   '*Confidence:* ' + esc(confidence) + '   *Image:* ' + esc(image_quality),
   '*Time (IST):* ' + esc(indiaTime),
   '',
-  '*' + (status === 'REINSPECT' ? 'WHY REINSPECTION IS NEEDED:' : 'FINDINGS:') + '*',
-  status === 'REINSPECT' && reinspect_reasons.length
-    ? reinspect_reasons.map(function (r) { return '\u2022 ' + esc(r); }).join('\n')
+  '*' + (bodyIsEvidenceGap ? 'Why reinspection is needed:' : 'Findings:') + '*',
+  bodyIsEvidenceGap && reinspect_reasons.length
+    ? bulletise(reinspect_reasons, '\u2022', asMrkdwn)
     : slackFindings(),
+  unverifiable.length ? '' : null,
+  unverifiable.length ? '*' + UNVERIFIABLE_TITLE + '*' : null,
+  unverifiable.length ? bulletise(unverifiable, '\u2022', asMrkdwn) : null,
   caveats.length ? '' : null,
   caveats.length ? caveats.map(function (c) { return ':warning: ' + c; }).join('\n') : null,
   RULE,
@@ -298,13 +449,27 @@ const htmlAlert = [
   '</div>',
   '<div style="padding:16px 20px;">',
   '<h3 style="color:#374151;margin:0 0 8px;font-size:14px;letter-spacing:.06em;">',
-  status === 'REINSPECT' ? 'WHY REINSPECTION IS NEEDED' : 'FINDINGS',
+  bodyIsEvidenceGap ? 'WHY REINSPECTION IS NEEDED' : 'FINDINGS',
   '</h3>',
   '<ul style="color:#4b5563;margin:0;padding-left:20px;font-size:14px;">',
-  status === 'REINSPECT' && reinspect_reasons.length
+  bodyIsEvidenceGap && reinspect_reasons.length
     ? reinspect_reasons.map(function (r) { return '<li style="padding:4px 0;">' + esc(r) + '</li>'; }).join('')
     : htmlFindings(),
   '</ul>',
+  // Same promotion as the other channels: on a REINSPECT this is the substance,
+  // and one <li> per item is the whole point.
+  unverifiable.length
+    ? '<h3 style="color:#374151;margin:16px 0 8px;font-size:14px;letter-spacing:.06em;">'
+        + esc(UNVERIFIABLE_TITLE.replace(/:$/, '').toUpperCase()) + '</h3>'
+        + '<ul style="color:#4b5563;margin:0;padding-left:20px;font-size:14px;">'
+        + unverifiable.map(function (item) {
+            const parts = splitCoded(item);
+            return '<li style="padding:4px 0;">'
+              + (parts.code ? '<strong>' + esc(parts.code) + '</strong> \u2014 ' : '')
+              + esc(parts.text) + '</li>';
+          }).join('')
+        + '</ul>'
+    : '',
   '</div>',
   caveats.length
     ? '<div style="padding:12px 20px;background:#fef3c7;border-top:1px solid #fde68a;font-size:13px;color:#78350f;">'
@@ -326,7 +491,9 @@ const subjectLead = critical_count > 0 ? 'CRITICAL' : status;
 
 return [{
   json: {
-    telegram_message: plainAlert + '\n' + esc(FOOTER),
+    // Was plainAlert, which carried no markup at all despite being posted with
+    // parse_mode: HTML. telegramAlert is the same information with hierarchy.
+    telegram_message: telegramAlert + '\n\n<i>' + esc(FOOTER) + '</i>',
     slack_message: slackAlert,
     email_html: htmlAlert,
     email_subject: emoji + ' AQUILA IND \u2014 ' + subjectLead + ': ' + site_id

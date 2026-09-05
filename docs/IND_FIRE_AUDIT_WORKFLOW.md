@@ -12,7 +12,7 @@ This document covers `AI_Field_Audit_v2.json`.
 - **Source of truth:** `scripts/nodes/ind_*.js`, written into the JSON by
   `scripts/patch_india_workflow.py`. The JSON is **patched in place**, not
   regenerated — see §6.
-- **Tests:** `node scripts/test_india.mjs` — 245 assertions, no n8n or database
+- **Tests:** `node scripts/test_india.mjs` — 260 assertions, no n8n or database
 
 ---
 
@@ -27,7 +27,7 @@ confusion about this project comes from assuming otherwise.
 | Code basis | one hardcoded prompt string | runtime registry, 9 jurisdictions |
 | Maintenance | JSON patched in place from `scripts/nodes/ind_*.js` | JSON generated whole from `scripts/nodes/*.js` |
 | Nodes | 18 (2 orphaned) | 23 |
-| Test coverage | 245 offline assertions | 110 offline assertions |
+| Test coverage | 260 offline assertions | 110 offline assertions |
 | Status derivation | derived in code from severity counts | derived in code from severity counts |
 | Findings model | CRITICAL / MAJOR / MINOR + citation, **no SLA tier** | same tiers, plus per-tier SLA (0 h / 72 h / 30 d) |
 | Input validation | SSRF guard + structured HTTP 400 | same, plus jurisdiction/occupancy fields |
@@ -472,7 +472,7 @@ to drop.
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 245 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 260 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
@@ -705,7 +705,7 @@ must not do. If the fallback fails too it continues rather than aborting, so
 
 ### ✅ 7.7 Offline tests — SHIPPED
 
-`scripts/test_india.mjs`, 245 assertions, no n8n, no database, no model call. It
+`scripts/test_india.mjs`, 260 assertions, no n8n, no database, no model call. It
 runs under the same restricted sandbox as `test_pipeline.mjs` — globals the n8n
 `vm` context does not reliably provide (`URL`, `Buffer`, `process`, `fetch`, …) are
 shadowed as undefined, because a friendlier harness once let a `new URL(...)`
@@ -861,7 +861,7 @@ These are not India-specific — see the US document for detail:
 | Derived status | ✅ computed in code from severities (7.1) |
 | Severity tiers | ✅ CRITICAL / MAJOR / MINOR + risk score (7.2) |
 | DB failure tolerance | ✅ `continueRegularOutput`, reports `persisted: false` (7.3) |
-| Offline tests | ✅ 245 assertions, restricted sandbox (7.7) |
+| Offline tests | ✅ 260 assertions, restricted sandbox (7.7) |
 | Notifier escaping | ✅ Telegram / Slack / email all escaped |
 | Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
 | Statute stated correctly in the **prompt** | ✅ with IS 2190 / IS 15683 citations (7.10) |
@@ -881,7 +881,7 @@ These are not India-specific — see the US document for detail:
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored
 alongside it, a database outage degrades the audit instead of discarding it, the
-notifier no longer loses messages to an unescaped ampersand, and 245 assertions run
+notifier no longer loses messages to an unescaped ampersand, and 260 assertions run
 without touching production.
 
 Input hardening (7.4, 7.5) and availability (7.6) are now closed too: a
