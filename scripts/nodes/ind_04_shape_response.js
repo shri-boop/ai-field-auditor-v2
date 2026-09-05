@@ -53,9 +53,14 @@ const persisted = !(dbResult.error || dbResult.$error);
 /**
  * The India table's primary key is a serial integer, and the insert echoes the
  * row, so a successful write can hand back the exact address of the record. That
- * is what the Records browser searches on (`record_id`) — India has no minted
- * audit_id, and this is its analogue. Absent when the write failed, which is
- * honest: there is no record to address.
+ * is what the Records browser searches on (`record_id`).
+ *
+ * It is kept alongside `audit_id` rather than replaced by it. They answer
+ * different questions: `record_id` is where the row physically is and only exists
+ * if the write succeeded, whereas `audit_id` identifies the audit itself and
+ * exists even when `persisted` is false. A caller that got `persisted: false`
+ * still has an `audit_id` to quote in a support request; it has no `record_id`,
+ * honestly, because there is no record to address.
  */
 const record_id = persisted && (typeof dbResult.id === 'number' || typeof dbResult.id === 'string')
   ? dbResult.id
@@ -76,7 +81,9 @@ return [{
     audit_timestamp: a.audit_timestamp,
 
     // ---- identity / traceability ----
-    audit_id: null,
+    // Minted in VALIDATE_Input (migration 006). Survives a failed DB write, and is
+    // what field_audit_signoffs will reference — SIGNOFF_DESIGN §14.1.
+    audit_id: a.audit_id || null,
     record_id: record_id,
     persisted: persisted,
 

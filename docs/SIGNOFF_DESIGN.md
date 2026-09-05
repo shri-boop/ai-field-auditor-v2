@@ -650,6 +650,15 @@ their own PR:
   Do it in the same migration as §14.1's `audit_id`: same table, same rewrite, both
   Form B prerequisites, one re-import.
 
+  **Both shipped in migration 006.** `audit_timestamp` is `timestamptz`, `audit_id`
+  is minted by `VALIDATE_Input` as `FA-IN-…`, and rows predating the column were
+  backfilled as `FA-INB-…` — the `B` marks an identifier derived retroactively by a
+  migration rather than assigned when the photograph was judged, which is a weaker
+  fact and is labelled rather than blended in. 006 also added
+  `(site_id, audit_timestamp DESC)`, which is the only shape of query Form B asks:
+  *this premises, this half-year.* §14.1 is therefore closed and §14.4's
+  `compliance_periods` is unblocked.
+
 ### 14.9 Open question that was missed — India personal data
 
 §13.3 asks about Florida retention. There is no India equivalent, and there needs to
