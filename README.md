@@ -27,10 +27,20 @@ python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
 node scripts/test_india.mjs                           # 260 assertions, no n8n or DB
 node scripts/test_credentials.mjs                     # 80 assertions, credential registry
+node scripts/test_signoff_sql.mjs                     # 96 assertions, sign-off SQL (structure only)
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
 its source file, so the tests cannot pass against code that is not what runs.
+
+⚠️ **`test_signoff_sql.mjs` does not execute SQL.** It asserts that the rules in
+`scripts/db/007_*.sql` still match the rules in
+[SIGNOFF_DESIGN.md](docs/SIGNOFF_DESIGN.md) — nothing more. The sign-off SQL is the
+one part of this repo with no offline execution coverage, because no Postgres is
+available where it is developed. `scripts/db/007_verify.sql` is the real test: it
+runs every rule on the actual engine and prints PASS/FAIL inside a transaction it
+rolls back, and it must be run after applying migration 007. See
+[SIGNOFF_DESIGN.md §16](docs/SIGNOFF_DESIGN.md).
 
 Things to know before re-importing it into n8n:
 
@@ -191,7 +201,7 @@ its basis, but not the full NFPA 25 Ch. 15 action checklist.
 
 ```bash
 node --check scripts/nodes/history_01_validate_query.js   # and _02
-node scripts/test_history.mjs                             # 94 assertions, no n8n or DB needed
+node scripts/test_history.mjs                             # 98 assertions, no n8n or DB needed
 python3 scripts/build_history_workflow.py                 # regenerate
 python3 scripts/build_history_workflow.py --check         # verify committed JSON
 ```
