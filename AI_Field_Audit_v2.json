@@ -27,7 +27,7 @@
     },
     {
       "parameters": {
-        "jsCode": "/**\n * INDIA NODE 1 — PARSE_Input\n * Mode: Run Once for All Items\n *\n * Normalises the webhook body into the fields the rest of the chain reads by\n * name.\n *\n * SCOPE NOTE — this node is deliberately NOT hardened yet. It still throws on a\n * missing image_url, which aborts the run before Respond_to_Webhook1 and leaves\n * the caller with an empty body, and it performs no SSRF checks on a URL that a\n * third party (OpenRouter) will dereference. Those are roadmap items 7.4 and 7.5\n * and they need a validation-routing node plus a RESPOND_BadRequest node, which\n * is a change to the workflow's shape rather than to this file. The US\n * implementation to port from is scripts/nodes/01_validate_input.js.\n *\n * It lives in a file rather than inside the patch script so the JavaScript is\n * reviewable as JavaScript — the same reason the US nodes do.\n */\n\nconst body = $input.first().json.body || {};\n\nconst image_url = body.image_url || null;\nconst site_id = body.site_id || 'unknown';\n\nif (!image_url || image_url.trim().length === 0) {\n  throw new Error('Missing required field: image_url not found in request body.');\n}\n\n// asset_tag identifies WHICH device at the site. A site holds many devices and is\n// audited repeatedly, so without it two audits of one address are\n// indistinguishable. inspector_id records who captured the evidence; it is what\n// prints as \"Captured by\" on the report, and it is deliberately NOT the sign-off\n// name — that requires a qualified reviewer, not whoever ran the scan.\nfunction clean(value, fallback, maxLength) {\n  const out = String(value === undefined || value === null ? '' : value).trim();\n  return (out || fallback).slice(0, maxLength || 64);\n}\n\nreturn [{\n  json: {\n    image_url: image_url.trim(),\n    site_id: site_id,\n    asset_tag: clean(body.asset_tag, '', 64) || null,\n    inspector_id: clean(body.inspector_id, 'UNASSIGNED', 64)\n  }\n}];\n"
+        "jsCode": "/**\n * INDIA NODE 1 — PARSE_Input  (validate + normalise)\n * Mode: Run Once for All Items\n *\n * Responsibilities:\n *   - Hard validation of the inbound webhook body.\n *   - SSRF hardening: `image_url` is caller-controlled and is later dereferenced\n *     by a third party (OpenRouter), so the scheme and host are restricted.\n *   - Normalise the fields the rest of the chain reads by name.\n *\n * Roadmap 7.4 (SSRF guard) and 7.5 (structured HTTP 400). Ported from the US\n * implementation, scripts/nodes/01_validate_input.js.\n *\n * ---------------------------------------------------------------------------\n * WHY THE NODE IS STILL CALLED PARSE_Input\n * ---------------------------------------------------------------------------\n * Its job grew from \"normalise the body\" to \"validate, then normalise\", but two\n * downstream nodes reach back for it by name — `$('PARSE_Input')` in\n * ind_02_build_payload.js and ind_03_derive_verdict.js. Renaming the node would\n * break both references and discard the node's execution history in n8n, so the\n * name stays and the filename carries the new meaning. PARSE_Response did the\n * same when it changed from transcribing a verdict to deriving one.\n *\n * ---------------------------------------------------------------------------\n * WHY THERE IS NO `new URL(...)` HERE\n * ---------------------------------------------------------------------------\n * The n8n Code node runs inside a restricted `vm` context. Standard web globals\n * are NOT guaranteed to exist there, and `new URL(...)` throws a ReferenceError\n * on this deployment.\n *\n * The US node learned this the hard way: its first version wrapped the call in\n * `try { new URL(x) } catch { throw 'not a valid absolute URL' }`, so an\n * environment failure was reported as a caller mistake and the operator was sent\n * off to debug a URL that was perfectly valid. Parsing is done with a regex\n * instead, and no catch block here reports an input error for what is actually a\n * programming or environment error.\n *\n * ---------------------------------------------------------------------------\n * FAILURE MODE — WHY THIS NO LONGER THROWS\n * ---------------------------------------------------------------------------\n * This node used to `throw` on a missing image_url. Throwing aborts the\n * execution before Respond_to_Webhook1 is reached, so the caller received HTTP\n * 500 with an empty body and no way to tell a bad request from a broken\n * workflow. It now emits `validation_ok: false` plus a structured error, and\n * ROUTE_Validation sends that to RESPOND_BadRequest as a real HTTP 400.\n *\n * Cheap side benefit: a rejected request never reaches the vision model, so\n * malformed input costs nothing. Every audit is a paid call.\n */\n\nconst body = $input.first().json.body || {};\n\n// Structured rejection -> HTTP 400 via ROUTE_Validation. Never throw.\nfunction reject(code, message, received) {\n  return [{\n    json: {\n      validation_ok: false,\n      validation_error_code: code,\n      validation_error: message,\n      received_value: received === undefined ? null : String(received).slice(0, 200),\n      rejected_at: new Date().toISOString()\n    }\n  }];\n}\n\n// ---------------------------------------------------------------- image_url\nconst image_url = String(body.image_url === undefined || body.image_url === null ? '' : body.image_url).trim();\nif (!image_url) {\n  return reject('IMAGE_URL_MISSING', '\"image_url\" is required and was empty.', body.image_url);\n}\n\n// Absolute-URI shape: scheme \"://\" authority [ path/query/fragment ]\n// Deliberately regex-based; see the header note above.\nconst ABSOLUTE_URL_RE = /^([A-Za-z][A-Za-z0-9+.\\-]*):\\/\\/([^/?#\\s]+)([/?#][^\\s]*)?$/;\nconst match = image_url.match(ABSOLUTE_URL_RE);\nif (!match) {\n  return reject(\n    'IMAGE_URL_MALFORMED',\n    '\"image_url\" is not a valid absolute URL. Expected the form https://host/path.',\n    image_url\n  );\n}\n\nconst scheme = match[1].toLowerCase();\nconst authority = match[2];\n\nif (scheme !== 'https') {\n  return reject('IMAGE_URL_NOT_HTTPS', '\"image_url\" must use https (received scheme \"' + scheme + '\").', image_url);\n}\n\n// Embedded credentials are a classic allow-list bypass: a naive check on\n// \"https://trusted-host.com@evil.example/x\" reads the wrong host entirely.\nif (authority.indexOf('@') !== -1) {\n  return reject('IMAGE_URL_HAS_USERINFO', '\"image_url\" must not contain credentials or an \"@\" in the host.', image_url);\n}\n\n// Strip a trailing :port. Bracketed IPv6 literals are refused outright.\nconst host = authority.replace(/:\\d+$/, '').toLowerCase();\n\nif (!host) {\n  return reject('IMAGE_URL_NO_HOST', '\"image_url\" has no host component.', image_url);\n}\nif (host.charAt(0) === '[') {\n  return reject('IMAGE_URL_IP_LITERAL', 'IPv6 literal image hosts are not permitted.', image_url);\n}\n\n// Allow-list of object-store hosts we are willing to hand to the vision\n// provider. Entries beginning with \".\" are suffix matches on the hostname.\n//\n// Deliberately identical to ALLOWED_IMAGE_HOSTS in the US node: both regions are\n// fed by the same dashboard and the same /api/upload route, so letting the two\n// lists drift would mean an image host that works in one region and not the\n// other, for no reason a caller could discover.\nconst ALLOWED_IMAGE_HOSTS = [\n  '.public.blob.vercel-storage.com',\n  '.s3.amazonaws.com',\n  '.s3.us-east-1.amazonaws.com',\n  '.r2.cloudflarestorage.com',\n  '.blob.core.windows.net',\n  'storage.googleapis.com'\n];\n\nconst hostAllowed = ALLOWED_IMAGE_HOSTS.some(function (entry) {\n  return entry.charAt(0) === '.' ? host.endsWith(entry) : host === entry;\n});\nif (!hostAllowed) {\n  return reject(\n    'IMAGE_HOST_NOT_ALLOWED',\n    'Image host is not allow-listed: ' + host + '. Add it to ALLOWED_IMAGE_HOSTS in PARSE_Input if this is intentional.',\n    image_url\n  );\n}\n\n// Defence in depth: refuse loopback / link-local / RFC1918 literals outright.\n// Unreachable while the allow-list holds, but it is the check that still stands\n// if someone widens the list carelessly.\nconst PRIVATE_LITERAL = /^(localhost|0\\.0\\.0\\.0|127\\.|10\\.|169\\.254\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)/;\nif (PRIVATE_LITERAL.test(host)) {\n  return reject('IMAGE_HOST_PRIVATE', 'Private, loopback or link-local image hosts are not permitted.', image_url);\n}\n\n// ------------------------------------------------------------ site metadata\n// asset_tag identifies WHICH device at the site. A site holds many devices and is\n// audited repeatedly, so without it two audits of one address are\n// indistinguishable. inspector_id records who captured the evidence; it is what\n// prints as \"Captured by\" on the report, and it is deliberately NOT the sign-off\n// name — that requires a qualified reviewer, not whoever ran the scan.\nfunction clean(value, fallback, maxLength) {\n  const out = String(value === undefined || value === null ? '' : value).trim();\n  return (out || fallback).slice(0, maxLength || 64);\n}\n\n// site_id is NOT upper-cased and its fallback is lower-case 'unknown', unlike the\n// US node. That difference is deliberate: every India row already written carries\n// this normalisation, and changing it now would split the history of a site\n// across two spellings of its own id.\nconst site_id = clean(body.site_id, 'unknown', 64);\n\nreturn [{\n  json: {\n    validation_ok: true,\n    image_url: image_url,\n    image_host: host,\n    site_id: site_id,\n    asset_tag: clean(body.asset_tag, '', 64) || null,\n    inspector_id: clean(body.inspector_id, 'UNASSIGNED', 64)\n  }\n}];\n"
       },
       "id": "b71dc0a6-05d9-4cb7-9205-f1d16d7486c9",
       "name": "PARSE_Input",
@@ -61,7 +61,9 @@
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify($json.payload) }}",
-        "options": {}
+        "options": {
+          "timeout": 120000
+        }
       },
       "id": "7d9fc497-22bb-44c1-9eba-d00c5b754573",
       "name": "Claude_Vision_API",
@@ -76,7 +78,11 @@
           "id": "Yo4OGxALKxIBKco8",
           "name": "OpenRouter"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -529,6 +535,72 @@
         -744,
         576
       ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 2,
+        "output": "={{ $json.validation_ok ? 0 : 1 }}",
+        "options": {}
+      },
+      "id": "ind-route-validation-0002",
+      "name": "ROUTE_Validation",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -2064,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'REJECTED', error_code: $json.validation_error_code, error: $json.validation_error, received_value: $json.received_value, advisory_only: true }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "ind-respond-badrequest-0003",
+      "name": "RESPOND_BadRequest",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -2064,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify(Object.assign({}, $('BUILD_Vision_Payload').first().json.payload, { model: 'openai/gpt-4o' })) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ind-vision-fallback-0004",
+      "name": "Vision_Fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -1344,
+        660
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "Yo4OGxALKxIBKco8",
+          "name": "OpenRouter"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -547,7 +619,7 @@
       "main": [
         [
           {
-            "node": "BUILD_Vision_Payload",
+            "node": "ROUTE_Validation",
             "type": "main",
             "index": 0
           }
@@ -570,6 +642,13 @@
         [
           {
             "node": "PARSE_Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Vision_Fallback",
             "type": "main",
             "index": 0
           }
@@ -668,6 +747,35 @@
         [
           {
             "node": "IF_NonCompliant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ROUTE_Validation": {
+      "main": [
+        [
+          {
+            "node": "BUILD_Vision_Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RESPOND_BadRequest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision_Fallback": {
+      "main": [
+        [
+          {
+            "node": "PARSE_Response",
             "type": "main",
             "index": 0
           }

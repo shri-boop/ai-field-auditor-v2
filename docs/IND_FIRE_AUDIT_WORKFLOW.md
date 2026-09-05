@@ -12,7 +12,7 @@ This document covers `AI_Field_Audit_v2.json`.
 - **Source of truth:** `scripts/nodes/ind_*.js`, written into the JSON by
   `scripts/patch_india_workflow.py`. The JSON is **patched in place**, not
   regenerated — see §6.
-- **Tests:** `node scripts/test_india.mjs` — 164 assertions, no n8n or database
+- **Tests:** `node scripts/test_india.mjs` — 213 assertions, no n8n or database
 
 ---
 
@@ -26,13 +26,13 @@ confusion about this project comes from assuming otherwise.
 | Origin | the original build, evolved in place | designed from scratch afterwards |
 | Code basis | one hardcoded prompt string | runtime registry, 9 jurisdictions |
 | Maintenance | JSON patched in place from `scripts/nodes/ind_*.js` | JSON generated whole from `scripts/nodes/*.js` |
-| Nodes | 15 (2 orphaned) | 23 |
-| Test coverage | 164 offline assertions | 106 offline assertions |
+| Nodes | 18 (2 orphaned) | 23 |
+| Test coverage | 213 offline assertions | 110 offline assertions |
 | Status derivation | derived in code from severity counts | derived in code from severity counts |
 | Findings model | CRITICAL / MAJOR / MINOR + citation, **no SLA tier** | same tiers, plus per-tier SLA (0 h / 72 h / 30 d) |
-| Input validation | throws on missing `image_url` | full schema + SSRF guard, structured HTTP 400 |
+| Input validation | SSRF guard + structured HTTP 400 | same, plus jurisdiction/occupancy fields |
 | DB write failure | `continueRegularOutput`, reports `persisted: false` | same |
-| Model resilience | single model, no timeout, no retry | timeout + retries + second-model fallback |
+| Model resilience | 120 s timeout, 3 tries, `openai/gpt-4o` fallback | same |
 | `violations` storage | stringified JSON in `text`, **plus** structured `jsonb` `deficiencies` | `jsonb` + GIN index |
 | Primary key | `id` (integer serial) | `audit_id` (minted text) |
 | `audit_timestamp` type | **`text`** | `timestamptz` |
@@ -40,8 +40,9 @@ confusion about this project comes from assuming otherwise.
 Section 3 of the US document enumerates the thirteen original differences. India
 has since closed the ones that governed correctness — derived status, severity
 tiers, database-failure tolerance, notifier escaping — and the offline suite that
-proves it. What remains open is real but narrower: SSRF, structured 400s, model
-resilience, and the `text` timestamp column. See §7.
+proves it — and, with 7.4–7.6, input hardening and model resilience as well. What
+remains open is narrower: sign-off, equipment classification, and the `text`
+timestamp column. See §7.
 
 The deliberate non-parity is the **SLA tier**. The US model runs on remediation
 clocks; a Maharashtra owner works to Form B's half-yearly calendar, so copying
@@ -54,23 +55,37 @@ clocks; a Maharashtra owner works to Form B's half-yearly calendar, so copying
 
 ```
 Webhook
-  └─ PARSE_Input            ind_01_parse_input.js
-      │                     image_url + site_id + asset_tag + inspector_id
-      └─ BUILD_Vision_Payload    ind_02_build_payload.js
-          │                      13-item severity-tagged checklist
-          │                      does NOT ask the model for a status
-          └─ Claude_Vision_API   anthropic/claude-sonnet-4-5, no timeout, no retry
-              └─ PARSE_Response  ind_03_derive_verdict.js
-                  │              DERIVES the verdict from severities
-                  └─ LOG_Audit   -> field_audit_logs
-                      │          onError: continueRegularOutput, 3 tries
-                      └─ SHAPE_Response   ind_04_shape_response.js
-                          │               sets `persisted`, declares the contract
-                          └─ IF_NonCompliant   branches on `alert_required`
-                               ├─ true  → NOTIFY_OpsManager  ind_05_build_alert.js
-                               │            → SEND_Slack + SEND_Telegram
-                               │          + Respond_to_Webhook1
-                               └─ false → Respond_to_Webhook1
+  └─ PARSE_Input                ind_01_validate_input.js
+      │                         SSRF-guards image_url; emits validation_ok,
+      │                         never throws
+      └─ ROUTE_Validation       switch on `validation_ok`
+          ├─ 1 rejected
+          │   └─ RESPOND_BadRequest   HTTP 400 + error_code + reason
+          │                           (never reaches the model, so it is free)
+          └─ 0 valid
+              └─ BUILD_Vision_Payload   ind_02_build_payload.js
+                  │                     13-item severity-tagged checklist
+                  │                     does NOT ask the model for a status
+                  └─ Claude_Vision_API  anthropic/claude-sonnet-4-5
+                      │                 120 s timeout, 3 tries
+                      ├─ 1 error
+                      │   └─ Vision_Fallback   openai/gpt-4o, 2 tries ─┐
+                      └─ 0 ok                                          │
+                          └─ PARSE_Response  ind_03_derive_verdict.js ─┘
+                              │              DERIVES the verdict from severities
+                              └─ LOG_Audit   -> field_audit_logs
+                                  │          onError: continueRegularOutput,
+                                  │          3 tries
+                                  └─ SHAPE_Response  ind_04_shape_response.js
+                                      │        sets `persisted`, declares
+                                      │        the response contract
+                                      └─ IF_NonCompliant  on `alert_required`
+                                          ├─ true  → NOTIFY_OpsManager
+                                          │            ind_05_build_alert.js
+                                          │            → SEND_Slack
+                                          │            + SEND_Telegram
+                                          │          + Respond_to_Webhook1
+                                          └─ false → Respond_to_Webhook1
 ```
 
 Every Code node's JavaScript lives in `scripts/nodes/ind_*.js` and is written into
@@ -276,10 +291,30 @@ Notes on the fields that carry weight:
 
 ### Failure
 
-There is no structured error path. A missing `image_url` **throws**, which aborts
-the execution before `Respond_to_Webhook1` — so the caller receives an empty body
-with no explanation. The US workflow's `RESPOND_BadRequest` exists precisely
-because of this.
+Bad input gets a structured **HTTP 400** from `RESPOND_BadRequest`:
+
+```json
+{
+  "status": "REJECTED",
+  "error_code": "IMAGE_HOST_NOT_ALLOWED",
+  "error": "Image host is not allow-listed: evil.example.com. Add it to ALLOWED_IMAGE_HOSTS in PARSE_Input if this is intentional.",
+  "received_value": "https://evil.example.com/x.jpg",
+  "advisory_only": true
+}
+```
+
+`error_code` is one of `IMAGE_URL_MISSING`, `IMAGE_URL_MALFORMED`,
+`IMAGE_URL_NOT_HTTPS`, `IMAGE_URL_HAS_USERINFO`, `IMAGE_URL_NO_HOST`,
+`IMAGE_URL_IP_LITERAL`, `IMAGE_HOST_NOT_ALLOWED` or `IMAGE_HOST_PRIVATE`.
+`received_value` is truncated to 200 characters.
+
+`PARSE_Input` deliberately does **not** throw. A throw aborts the execution before
+`Respond_to_Webhook1` runs, which is what used to leave the caller with an empty
+body and no way to tell a bad request from a broken workflow (§7.5).
+
+If the vision call itself fails, `Vision_Fallback` retries on a second model
+(§7.6); if that fails too the run continues and `PARSE_Response` reports a
+`SYSTEM_ERROR` verdict rather than failing silently.
 
 ---
 
@@ -374,7 +409,7 @@ to drop.
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 164 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 213 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
@@ -418,7 +453,8 @@ after the import.
 ## 7. Roadmap
 
 India's roadmap is mostly **catching up to the US workflow**, and the ordering
-reflects risk, not effort. 7.1–7.3 have shipped; 7.4 onward have not.
+reflects risk, not effort. 7.1–7.7 and 7.10–7.11 have shipped; sign-off (7.8,
+7.9) and the `audit_timestamp` column type have not.
 
 ### ✅ 7.1 Trust the code, not the model, for `status` — SHIPPED
 
@@ -476,28 +512,83 @@ briefly unavailable — with the finding already computed and sitting in memory.
 - **`Respond_to_Webhook1` returned whatever ran last.** The response shape was an
   accident of node ordering — a Postgres row echo. `SHAPE_Response` now declares it.
 
-### 7.4 SSRF guard on `image_url`
+### ✅ 7.4 SSRF guard on `image_url` — SHIPPED
 
-`image_url` is caller-controlled and dereferenced by a third party (OpenRouter).
-India accepts anything. `scripts/nodes/01_validate_input.js` has the US
-implementation: https-only, host allow-list, no userinfo, no IP literals, no
-private ranges.
+`image_url` is caller-controlled and is dereferenced by a third party
+(OpenRouter), which made the audit webhook a request-forgery primitive aimed at
+whatever host the caller named. India previously accepted anything.
 
-### 7.5 Structured errors instead of throwing
+`PARSE_Input` (`scripts/nodes/ind_01_validate_input.js`, ported from the US
+`scripts/nodes/01_validate_input.js`) now requires https, matches the host against
+an allow-list of object stores, and refuses userinfo, IPv6 literals and private
+ranges. The allow-list is deliberately byte-identical to the US one: both regions
+are fed by the same dashboard and the same `/api/upload`, so letting the lists
+drift would mean an image host that works in one region and not the other for no
+reason a caller could discover.
 
-Add the equivalent of `VALIDATE_Input` + `ROUTE_Validation` +
-`RESPOND_BadRequest`, so a malformed request gets an HTTP 400 with a reason
-instead of an empty body — and never reaches the vision model, so bad input costs
-nothing.
+Two details worth keeping:
 
-### 7.6 Resilience
+- **There is no `new URL(...)`.** The n8n Code node runs in a restricted `vm`
+  where that global is not reliably present. Parsing is regex-based, and the
+  offline harness shadows `URL`, `Buffer`, `process` and `fetch` as undefined so a
+  regression fails in the test rather than in production.
+- **The allow-list fires before the private-range check**, so a request for
+  `169.254.169.254` is rejected as `IMAGE_HOST_NOT_ALLOWED`, not
+  `IMAGE_HOST_PRIVATE`. The private-range check is therefore unreachable today.
+  It is kept as the check that still stands if someone widens the allow-list
+  carelessly — not as the one currently doing the work.
 
-No timeout, no retries, no fallback model. One provider incident drops the audit.
-The US workflow allows 120 s with 3 retries and falls back to GPT-4o.
+### ✅ 7.5 Structured errors instead of throwing — SHIPPED
+
+`PARSE_Input` used to `throw` on a missing `image_url`. A throw aborts the
+execution before `Respond_to_Webhook1` runs, so the caller received HTTP 500 with
+an empty body and no way to distinguish "I sent you a bad URL" from "your workflow
+is broken".
+
+It now emits `validation_ok` plus a structured error, and two new nodes turn that
+into a real response:
+
+| Node | Type | Job |
+|---|---|---|
+| `ROUTE_Validation` | `switch` | `={{ $json.validation_ok ? 0 : 1 }}` — 0 continues, 1 rejects |
+| `RESPOND_BadRequest` | `respondToWebhook` | HTTP 400 with `error_code`, `error`, `received_value`, `advisory_only` |
+
+The gate sits **before** `BUILD_Vision_Payload`, which is the point: a rejected
+request never reaches `Claude_Vision_API`, so malformed input costs nothing. Every
+audit is a metered vision call.
+
+The rejection echoes the offending value back, truncated to 200 characters, and
+names the actual cause — a disallowed host is reported as
+`IMAGE_HOST_NOT_ALLOWED`, never as a malformed URL. Reporting the wrong cause is
+what once sent an operator off to debug a perfectly valid URL in the US pipeline.
+
+### ✅ 7.6 Resilience — SHIPPED
+
+`Claude_Vision_API` had `options: {}` — no timeout at all — no `retryOnFail`, and
+no error output. A hung OpenRouter connection held the execution, and the caller's
+HTTP request, open indefinitely; any transport failure ended the audit with
+nothing written and no alert. That is the same class of silent loss 7.3 fixed for
+the database, left open for the model call.
+
+| Setting | Value | Why |
+|---|---|---|
+| `options.timeout` | 120000 | A large photo is slow, but not unbounded |
+| `retryOnFail` / `maxTries` | true / 3 | Nearly all provider failures are transient |
+| `waitBetweenTries` | 2000 | |
+| `onError` | `continueErrorOutput` | Route the failure instead of aborting the run |
+
+Only once three attempts have failed does `Vision_Fallback` fire, on
+`openai/gpt-4o`. The change of vendor is deliberate — failing over from Claude to
+another Anthropic model would share the outage being failed over from. The
+fallback reuses the payload `BUILD_Vision_Payload` already rendered and swaps only
+the `model` field, because re-rendering the prompt would risk grading the fallback
+against a different checklist than the primary, which is the one thing a fallback
+must not do. If the fallback fails too it continues rather than aborting, so
+`PARSE_Response` reports a visible `SYSTEM_ERROR` verdict instead of silence.
 
 ### ✅ 7.7 Offline tests — SHIPPED
 
-`scripts/test_india.mjs`, 164 assertions, no n8n, no database, no model call. It
+`scripts/test_india.mjs`, 213 assertions, no n8n, no database, no model call. It
 runs under the same restricted sandbox as `test_pipeline.mjs` — globals the n8n
 `vm` context does not reliably provide (`URL`, `Buffer`, `process`, `fetch`, …) are
 shadowed as undefined, because a friendlier harness once let a `new URL(...)`
@@ -603,8 +694,8 @@ These are not India-specific — see the US document for detail:
   `/webhook/audit-field-photov2` carries `authentication: headerAuth` bound to
   credential `Audit IND Key` (`aIwM7jr752xJv7Ss`), and `app/api/audit/route.ts` sends
   header **`x-audit-api-key`** from `AUDIT_API_KEY`. An unauthenticated POST returns
-  **403**; `{}` costs nothing to test because `PARSE_Input` throws before the vision
-  call.
+  **403**; `{}` costs nothing to test because it is rejected at `ROUTE_Validation`
+  with an HTTP 400, before the vision call (7.5).
 
   The secret is **different from `HISTORY_API_KEY`** on purpose: records are
   read-only, this endpoint spends money on every call. Full detail, including why the
@@ -633,15 +724,15 @@ These are not India-specific — see the US document for detail:
 | Derived status | ✅ computed in code from severities (7.1) |
 | Severity tiers | ✅ CRITICAL / MAJOR / MINOR + risk score (7.2) |
 | DB failure tolerance | ✅ `continueRegularOutput`, reports `persisted: false` (7.3) |
-| Offline tests | ✅ 164 assertions, restricted sandbox (7.7) |
+| Offline tests | ✅ 213 assertions, restricted sandbox (7.7) |
 | Notifier escaping | ✅ Telegram / Slack / email all escaped |
 | Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
 | Statute stated correctly in the **prompt** | ✅ with IS 2190 / IS 15683 citations (7.10) |
 | Scope declared by the workflow | ✅ `advisory_only`, `certification_eligible: false` (7.8) |
 | SLA tiers | ➖ deliberately absent — Form B calendar, not SLA (7.9) |
-| SSRF guard | ❌ none (7.4) |
-| Structured HTTP 400 | ❌ throws instead (7.5) |
-| Timeout / retry / fallback model | ❌ none (7.6) |
+| SSRF guard | ✅ https + host allow-list, no userinfo / IP literals / private ranges (7.4) |
+| Structured HTTP 400 | ✅ `ROUTE_Validation` + `RESPOND_BadRequest`, never throws (7.5) |
+| Timeout / retry / fallback model | ✅ 120 s, 3 tries, falls back to `openai/gpt-4o` (7.6) |
 | Sign-off columns and write path | ❌ none (7.8, 7.9) |
 | Form B support (half-yearly evidence pack) | ❌ researched, not built (7.9) |
 | Webhook authentication | ✅ Header Auth bound; unauthenticated POST returns 403 (7.11) |
@@ -650,9 +741,17 @@ These are not India-specific — see the US document for detail:
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored
 alongside it, a database outage degrades the audit instead of discarding it, the
-notifier no longer loses messages to an unescaped ampersand, and 164 assertions run
+notifier no longer loses messages to an unescaped ampersand, and 213 assertions run
 without touching production.
 
-What remains open is a different class of problem: input hardening (7.4, 7.5) and
-availability (7.6). The unauthenticated webhook (7.11) — the one item that was
-actively costing money — is closed and verified.
+Input hardening (7.4, 7.5) and availability (7.6) are now closed too: a
+caller-supplied `image_url` can no longer point the vision provider at an
+arbitrary host, a bad request gets an HTTP 400 with a reason instead of an empty
+body, and a provider incident fails over instead of losing the audit. The
+unauthenticated webhook (7.11) — the one item that was actively costing money —
+is closed and verified.
+
+What remains open is a different class of problem: sign-off (7.8, 7.9), which is
+what would turn advisory screening into a defensible statutory record, and the
+`audit_timestamp` column type (§5). Neither is a gap in what the workflow
+*claims* — the workflow is honest that it is advisory only.
