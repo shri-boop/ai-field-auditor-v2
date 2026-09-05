@@ -12,7 +12,7 @@ This document covers `AI_Field_Audit_v2.json`.
 - **Source of truth:** `scripts/nodes/ind_*.js`, written into the JSON by
   `scripts/patch_india_workflow.py`. The JSON is **patched in place**, not
   regenerated — see §6.
-- **Tests:** `node scripts/test_india.mjs` — 213 assertions, no n8n or database
+- **Tests:** `node scripts/test_india.mjs` — 215 assertions, no n8n or database
 
 ---
 
@@ -27,7 +27,7 @@ confusion about this project comes from assuming otherwise.
 | Code basis | one hardcoded prompt string | runtime registry, 9 jurisdictions |
 | Maintenance | JSON patched in place from `scripts/nodes/ind_*.js` | JSON generated whole from `scripts/nodes/*.js` |
 | Nodes | 18 (2 orphaned) | 23 |
-| Test coverage | 213 offline assertions | 110 offline assertions |
+| Test coverage | 215 offline assertions | 110 offline assertions |
 | Status derivation | derived in code from severity counts | derived in code from severity counts |
 | Findings model | CRITICAL / MAJOR / MINOR + citation, **no SLA tier** | same tiers, plus per-tier SLA (0 h / 72 h / 30 d) |
 | Input validation | SSRF guard + structured HTTP 400 | same, plus jurisdiction/occupancy fields |
@@ -409,7 +409,7 @@ to drop.
 node --check scripts/nodes/ind_03_derive_verdict.js   # syntax, per file
 python3 scripts/patch_india_workflow.py               # idempotent
 python3 scripts/patch_india_workflow.py --check       # verify committed JSON
-node scripts/test_india.mjs                           # 213 assertions, no n8n or DB
+node scripts/test_india.mjs                           # 215 assertions, no n8n or DB
 ```
 
 `test_india.mjs` asserts byte equality between each node's `jsCode` in the JSON and
@@ -446,7 +446,61 @@ columns explicitly, so importing it before 004 makes every Records lookup fail w
 registering `/webhook/audit-field-photov2` will conflict and India audits break.
 
 The file carries `"active": true`, matching production — confirm it is still active
-after the import.
+after the import. It also carries `"name": "AI_Field_Audit_V2"`, which n8n applies
+on import, so a stale name in the artifact would rename the live workflow. That is
+why `patch_india_workflow.py` sets the name and `test_india.mjs` asserts it.
+
+### Smoke tests after a re-import
+
+Real host, no placeholders — paste as-is. `<...>` in a URL is a **shell redirect**,
+so a command containing `https://<n8n-host>/...` never reaches the network at all;
+bash fails first with `No such file or directory`.
+
+Set the key once per shell. It is the *value* of the `Audit IND Key` credential in
+n8n, not the credential ID, and it is not exported in the box's shell by default:
+
+```bash
+read -rs AUDIT_KEY        # paste the key, press enter; keeps it out of ~/.bash_history
+```
+
+**1. Auth is closed** — costs nothing, no vision call:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://n8n.kratuailabs.com/webhook/audit-field-photov2 \
+  -H 'content-type: application/json' -d '{}'
+# expect 403
+```
+
+**2. A disallowed host is rejected with a reason (7.4 + 7.5):**
+
+```bash
+curl -s -w '\n%{http_code}\n' -X POST \
+  https://n8n.kratuailabs.com/webhook/audit-field-photov2 \
+  -H "x-audit-api-key: $AUDIT_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"image_url":"https://evil.example.com/x.jpg","site_id":"SMOKE"}'
+# expect 400 and status REJECTED / error_code IMAGE_HOST_NOT_ALLOWED
+```
+
+Then open the execution in n8n: it must stop at `RESPOND_BadRequest` and **never
+reach `Claude_Vision_API`**. That is the assertion that matters — it is what makes
+bad input free.
+
+**3. A missing `image_url` (was a 500 with an empty body before 7.5):**
+
+```bash
+curl -s -w '\n%{http_code}\n' -X POST \
+  https://n8n.kratuailabs.com/webhook/audit-field-photov2 \
+  -H "x-audit-api-key: $AUDIT_KEY" \
+  -H 'content-type: application/json' -d '{}'
+# expect 400 and error_code IMAGE_URL_MISSING
+```
+
+If test 3 returns **403** rather than 400, the key is wrong or unset — auth is
+checked before the workflow runs, so a bad key masks everything downstream. Test 1
+and test 3 send the same body and differ only in the header, which makes them a
+clean pair for isolating that.
 
 ---
 
@@ -588,7 +642,7 @@ must not do. If the fallback fails too it continues rather than aborting, so
 
 ### ✅ 7.7 Offline tests — SHIPPED
 
-`scripts/test_india.mjs`, 213 assertions, no n8n, no database, no model call. It
+`scripts/test_india.mjs`, 215 assertions, no n8n, no database, no model call. It
 runs under the same restricted sandbox as `test_pipeline.mjs` — globals the n8n
 `vm` context does not reliably provide (`URL`, `Buffer`, `process`, `fetch`, …) are
 shadowed as undefined, because a friendlier harness once let a `new URL(...)`
@@ -724,7 +778,7 @@ These are not India-specific — see the US document for detail:
 | Derived status | ✅ computed in code from severities (7.1) |
 | Severity tiers | ✅ CRITICAL / MAJOR / MINOR + risk score (7.2) |
 | DB failure tolerance | ✅ `continueRegularOutput`, reports `persisted: false` (7.3) |
-| Offline tests | ✅ 213 assertions, restricted sandbox (7.7) |
+| Offline tests | ✅ 215 assertions, restricted sandbox (7.7) |
 | Notifier escaping | ✅ Telegram / Slack / email all escaped |
 | Statute stated correctly in the UI | ✅ MFPLSM 2006 / Rules 2009 · CFO MCGM |
 | Statute stated correctly in the **prompt** | ✅ with IS 2190 / IS 15683 citations (7.10) |
@@ -741,7 +795,7 @@ These are not India-specific — see the US document for detail:
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored
 alongside it, a database outage degrades the audit instead of discarding it, the
-notifier no longer loses messages to an unescaped ampersand, and 213 assertions run
+notifier no longer loses messages to an unescaped ampersand, and 215 assertions run
 without touching production.
 
 Input hardening (7.4, 7.5) and availability (7.6) are now closed too: a
