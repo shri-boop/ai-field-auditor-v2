@@ -769,6 +769,26 @@ What still stands between here and Form B support: sign-off columns on
 `field_audit_logs`, a write path, and the credential model for a **Licensed Agency**
 rather than an individual permit-holder.
 
+Two of those are now specified rather than open — see
+[SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §14, which reviewed the US design against this
+table and found India breaks it in three places:
+
+- **`field_audit_logs` has no `audit_id`.** The signoff table is keyed on one, so it
+  cannot reference an India audit at all. India needs a minted `audit_id` (§14.1).
+- **The firm is the licensed party, and that is structural.** The registry needs
+  `signing_authority: INDIVIDUAL | FIRM` per jurisdiction, because Florida and
+  Maharashtra disagree about which credential is the instrument (§14.2).
+- **"No expiry recorded → desk review only" would exclude every Indian engineer**,
+  whose qualification genuinely does not expire. `expiry_semantics` separates
+  `PERPETUAL` from `UNKNOWN`, and the expiry control moves onto the Agency licence,
+  which does renew (§14.3).
+
+**Prerequisite, queued:** `audit_timestamp` is `text`, and Form B is defined by a date
+range (H1 = January–June). Postgres has no `text >= timestamptz` operator, so a
+half-yearly evidence pack cannot be selected from the column as it stands. Convert it
+to `timestamptz` in the same migration as the new `audit_id` — same table, same
+rewrite, both Form B prerequisites, one re-import.
+
 ### ✅ 7.10 Correct the hardcoded code basis in the prompt — SHIPPED
 
 The prompt said *"operating under NBC 2016 and CFO Mumbai norms"* verbatim, which was
@@ -834,7 +854,8 @@ These are not India-specific — see the US document for detail:
 | Webhook authentication | ✅ Header Auth bound; unauthenticated POST returns 403 (7.11) |
 | `site_id` required + normalised | ✅ `SITE_ID_MISSING` → 400; `upper(btrim(...))` + CHECK constraint (migration 005) |
 | Node-name reference drift | ✅ every `$('node')` reference asserted to resolve, in Code nodes and expressions |
-| `audit_timestamp` column type | ❌ still `text` (§5) |
+| `audit_timestamp` column type | ❌ still `text` (§5) — **blocks Form B date ranges**, queued with `audit_id` |
+| Minted `audit_id` | ❌ none; India is keyed on `id` — **blocks sign-off** (SIGNOFF_DESIGN §14.1) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
 reaches a human. The verdict is derived in code from severities that are stored
