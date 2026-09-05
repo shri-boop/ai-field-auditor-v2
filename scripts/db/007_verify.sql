@@ -38,7 +38,11 @@ CREATE TEMP TABLE _v (id serial, label text, ok boolean, detail text) ON COMMIT 
 CREATE OR REPLACE FUNCTION _chk(p_label text, p_ok boolean, p_detail text DEFAULT NULL)
 RETURNS void AS $$
 BEGIN
-    INSERT INTO _v (label, ok, detail) VALUES (p_label, COALESCE(p_ok, FALSE), p_detail);
+    -- Detail only on failure. A bracketed value beside a PASS line reads like a
+    -- warning and makes a clean run harder to scan.
+    INSERT INTO _v (label, ok, detail)
+    VALUES (p_label, COALESCE(p_ok, FALSE),
+            CASE WHEN COALESCE(p_ok, FALSE) THEN NULL ELSE p_detail END);
 END; $$ LANGUAGE plpgsql;
 
 -- Runs a statement expected to fail, and records whether it did. This is most of

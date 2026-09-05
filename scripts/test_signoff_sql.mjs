@@ -31,6 +31,8 @@ const REPO = dirname(HERE);
 
 const MIG = readFileSync(join(REPO, 'scripts', 'db', '007_field_audit_signoffs.sql'), 'utf8');
 const VER = readFileSync(join(REPO, 'scripts', 'db', '007_verify.sql'), 'utf8');
+const LOCK = readFileSync(join(REPO, 'scripts', 'db', '008_record_signoff_row_lock.sql'), 'utf8');
+const LOCKVER = readFileSync(join(REPO, 'scripts', 'db', '008_verify.sql'), 'utf8');
 const DESIGN = readFileSync(join(REPO, 'docs', 'SIGNOFF_DESIGN.md'), 'utf8');
 
 let pass = 0, fail = 0;
@@ -250,10 +252,73 @@ section('8. The verify script is safe to run against production');
     /can still be signed individually/.test(VER));
 }
 
+// ===========================================================================
+section('9. Migration 008 — the row lock, and 007 marked superseded');
+{
+  // Both reads must be locked. Locking one would leave the other region racy, and
+  // India is the region heading for a statutory artefact.
+  const locks = (LOCK.match(/FOR UPDATE;/g) || []).length;
+  check('008 locks both audit reads', locks === 2, 'found ' + locks);
+  check('008 replaces the function rather than altering the schema',
+    /CREATE OR REPLACE FUNCTION record_signoff/.test(LOCK) &&
+    /ALTER TABLE|CREATE TABLE/.test(LOCK) === false);
+  check('008 is one transaction',
+    (LOCK.match(/^BEGIN;/gm) || []).length === 1 && (LOCK.match(/^COMMIT;/gm) || []).length === 1);
+
+  // A full-body replacement is where a guard gets silently dropped, so every rule
+  // 007 shipped is re-asserted against 008's copy.
+  [
+    ['the section 6 catch-all refusal', /is not permitted/],
+    ['the SUPERVISOR requirement', /requires SUPERVISOR/],
+    ['the role gate', /may not sign/],
+    ['the bulk CRITICAL guard', /one at a time/],
+    ['the expired-credential guard', /lapsed certificate/],
+    ['the SELF_DECLARED guard', /SELF_DECLARED is the absence of/],
+    ['the FIRM licence guard', /firm licence number is required/],
+    ['the stale-verification guard', /fell due for review/],
+    ['the history INSERT', /INSERT INTO field_audit_signoffs/],
+    ['the US audit UPDATE', /UPDATE field_audit_us_logs/],
+    ['the India audit UPDATE', /UPDATE field_audit_logs/]
+  ].forEach(function (pair) {
+    check(pair[0] + ' survived the replacement in 008', pair[1].test(LOCK));
+  });
+
+  // The lock protects nothing if it is taken after the decision.
+  check('the lock is taken before the transition check',
+    LOCK.indexOf('FOR UPDATE;') < LOCK.indexOf('is not permitted'));
+
+  check('008 explains why editing 007 in place was rejected',
+    /already applied to production/.test(LOCK));
+  check('008 is honest that 44 green assertions did not catch this',
+    /single-session/.test(LOCK));
+
+  check('007 marks its own function definition superseded',
+    /SUPERSEDED BY MIGRATION 008/.test(MIG));
+  check('007 tells the reader to apply 008',
+    /008_record_signoff_row_lock\.sql/.test(MIG));
+
+  // The deployed function, not the file on disk, is what runs.
+  check('008_verify inspects the DEPLOYED function, not the file',
+    /pg_get_functiondef/.test(LOCKVER));
+  check('008_verify checks both locks are present',
+    /BOTH audit reads/.test(LOCKVER));
+  check('008_verify re-checks the guards survived',
+    /survived/.test(LOCKVER));
+  check('008_verify documents the two-session race procedure it cannot run',
+    /TWO psql sessions/.test(LOCKVER) && /BLOCKS, waiting on the row lock/.test(LOCKVER));
+  check('008_verify is read-only apart from a rolled-back transaction',
+    /^ROLLBACK;/m.test(LOCKVER) && /^COMMIT;/m.test(LOCKVER) === false);
+
+  // Cosmetic, but a bracketed detail beside a PASS reads like a warning.
+  check('both verify scripts report detail only on failure',
+    /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(VER) &&
+    /CASE WHEN COALESCE\(p_ok, FALSE\) THEN NULL ELSE p_detail END/.test(LOCKVER));
+}
+
 console.log('\n' + '='.repeat(64));
 console.log('PASS: ' + pass + '   FAIL: ' + fail);
 if (fail) { console.log('\nFAILURES'); failures.forEach((f) => console.log('  - ' + f)); }
 console.log('='.repeat(64));
-console.log('NOTE: this file does not execute SQL. Run scripts/db/007_verify.sql');
-console.log('      against Postgres after applying 007 — that is the real test.');
+console.log('NOTE: this file does not execute SQL. Run 007_verify.sql and');
+console.log('      008_verify.sql against Postgres — those are the real tests.');
 process.exit(fail === 0 ? 0 : 1);

@@ -460,6 +460,18 @@ flat human-readable line, kept for continuity with every row written before it.
   [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §16.
 
   No workflow re-import is needed — nothing in n8n writes these columns yet.
+- `008_record_signoff_row_lock.sql` — **a correctness fix to 007; apply it.**
+  `record_signoff()` checked the current `signoff_status` against the permitted
+  transitions and then wrote, without locking the row it read. Under Postgres'
+  default isolation two concurrent calls both see `PENDING`, both pass the check, and
+  both write `CONFIRMED` — so the double-signing guard was bypassable by racing it,
+  despite `007_verify.sql` reporting 44 passed, 0 failed.
+
+  Every assertion in that harness runs in one session, and a single-session harness
+  cannot observe a race. `SELECT ... FOR UPDATE` makes the second caller wait,
+  re-read `CONFIRMED`, and be refused. Verify with `scripts/db/008_verify.sql`, which
+  inspects the deployed function rather than the file. See
+  [SIGNOFF_DESIGN.md](SIGNOFF_DESIGN.md) §16.1.
 
 All are fully guarded: they verify the table and each column first and skip
 cleanly, because that table's shape cannot be proved from source control. All are
@@ -900,7 +912,7 @@ These are not India-specific — see the US document for detail:
 | Node-name reference drift | ✅ every `$('node')` reference asserted to resolve, in Code nodes and expressions |
 | `audit_timestamp` column type | ✅ `timestamptz` (migration 006) — Form B date ranges now possible |
 | Minted `audit_id` | ✅ `FA-IN-…` minted in `VALIDATE_Input`; historical rows backfilled `FA-INB-…` (006) |
-| Sign-off columns + write path | ✅ `field_audit_signoffs`, append-only, with atomic `record_signoff()` (007) |
+| Sign-off columns + write path | ✅ `field_audit_signoffs`, append-only, atomic and row-locked `record_signoff()` (007 + 008) |
 | Form B evidence pack | ❌ needs `compliance_periods` + confirmed `IN-MH` registry + prescribed wording (7.9) |
 
 **Honest summary:** India has caught up on the things that decide whether a finding
