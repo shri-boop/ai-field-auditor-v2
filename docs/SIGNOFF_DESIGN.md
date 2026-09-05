@@ -950,3 +950,95 @@ applied; editing it in place would leave a database that ran the old definition
 indistinguishable from one that ran the new definition as far as source control is
 concerned, which is the silent-divergence failure this project has been bitten by
 twice already.
+
+---
+
+## 17. Tenancy — decided, because org-scoped roles required it
+
+§13.2 asked whether `SUPERVISOR` needs an organisational scope. **Answered: yes.** A
+Phoenix supervisor must not be able to override a rejection in Denver — that is not a
+permissions nicety, it is who carries the licence risk for that job. And org scope is
+what makes the 200-technician multi-state contractor sellable at all, which is the §4
+wedge customer.
+
+That answer commits the product to multi-tenancy, and multi-tenancy had to reach the
+audit data. **It did not.** Before migration 009:
+
+- neither audit table had any tenant column
+- the Records query filtered on `site_id` only — and `site_id` is *caller-supplied*
+- one shared HTTP Basic credential served every user
+
+Harmless with one tenant. With two customers it is a data-isolation breach: a user in
+one organisation could read another's audits by guessing a `site_id`, and two
+customers who both name a building `SITE-001` would share rows, history, and each
+other's Form B evidence.
+
+### 17.1 The model
+
+**Shared database, row-level scoping by `org_id`.** Not one deployment per customer,
+and not one database per tenant.
+
+| Rejected | Why |
+|---|---|
+| Deployment per customer | Isolation is free, but no trials, no self-serve, and the eleventh customer needs an ops runbook. Caps the product at bespoke consulting. |
+| Database per tenant | Over-built before revenue. |
+
+The chosen model keeps the door open in the direction that matters: a demanding
+enterprise tenant can later be extracted to its own database. Single-tenant →
+multi-tenant is the migration nobody survives.
+
+Honest limit: a large buyer in a compliance domain will eventually ask for physical
+isolation. This design permits that answer later rather than pre-paying for it.
+
+### 17.2 Snapshot what was attested; reference what is merely scoped
+
+A credential is frozen onto each signature because its historical value *is* the
+point (§2). An audit's owning organisation is a **scoping key**, not an attestation —
+if a company rebrands, every one of its audits should show the new name. So `org_id`
+holds a stable identifier, no `org_name` is frozen onto audit rows, and names resolve
+at render time from the accounts database.
+
+### 17.3 `org_id` is never caller-supplied
+
+`site_id` is, and that is exactly why 009 was needed. Accepting `org_id` the same way
+would hand a caller the ability to file into — or later read — another tenant's data.
+
+When auth ships the chain is: **authenticated session → proxy resolves the org →
+proxy sends it → workflow writes it.** The request body is not part of that chain.
+Both regions' `VALIDATE_Input` ignore a body-supplied `org_id`, and both test suites
+assert that a spoofed value reaches nothing downstream.
+
+Ignored rather than rejected: refusing would confirm the field is meaningful and
+invite probing at it, and no legitimate caller sends it.
+
+### 17.4 Nullable, deliberately
+
+Nothing can populate `org_id` yet — `/api/audit` authenticates to n8n with a shared
+key and has no session, so there is nothing to derive an organisation from. `NOT NULL`
+would fail every insert until step 4 ships.
+
+The column exists now anyway, because its absence is what would cause steps 5–8 to be
+built against an unscoped model and then need revisiting. Existing rows are
+backfilled to `ORG-KRATU-INTERNAL` — visibly internal, for the same reason 006 marked
+backfilled identifiers `FA-INB-` rather than blending them in.
+
+### 17.5 Accounts live on Neon
+
+Decided. The original framing in §11 — "reachable from Vercel" — was the weakest
+version of the argument. The real reasons:
+
+- **Connection pooling.** Vercel scales functions horizontally and auth is checked on
+  every request, the hottest path in the system. Vanilla Postgres defaults to ~100
+  `max_connections`; the Oracle container would need PgBouncer in front of it.
+- **No public Postgres port.** Vercel's serverless egress IPs are dynamic, so IP
+  allowlisting does not work cleanly. Exposing the audit database's host to solve an
+  auth problem is a bad trade.
+- **Point-in-time recovery.** For a product whose value is defensible records,
+  "we lost the sign-off history" is existential rather than embarrassing.
+- **Blast radius.** Accounts compromised ≠ audit data compromised.
+
+The Oracle Postgres container remains the home for audits **and is development and
+demo infrastructure, not product infrastructure.** One container on one VM is a
+single point of failure across all tenants with no per-customer restore. That is
+acceptable pre-revenue and is stated here so it does not quietly become production
+because it worked for the first two customers.

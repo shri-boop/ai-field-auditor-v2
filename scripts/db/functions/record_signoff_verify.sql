@@ -1,10 +1,15 @@
 -- ===========================================================================
--- 008_verify.sql — confirm the deployed record_signoff() carries the row lock
+-- record_signoff_verify.sql — verify the DEPLOYED record_signoff()
 -- ===========================================================================
 --
--- Run after applying 008:
+-- Run after applying scripts/db/functions/record_signoff.sql:
 --   docker exec -i ai-stack-postgres-1 sh -c \
---     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/db/008_verify.sql
+--     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/db/functions/record_signoff_verify.sql
+--
+-- Supersedes the old 008_verify.sql, which checked only the row lock. This verifies
+-- every guard the canonical function is supposed to carry, so that re-applying the
+-- function after any change is followed by one command that says whether it is
+-- still correct.
 --
 -- WHAT THIS CAN CHECK, AND WHAT IT CANNOT
 -- ---------------------------------------
@@ -90,6 +95,21 @@ BEGIN
         AND position('UPDATE field_audit_us_logs' in v_def) > 0
         AND position('UPDATE field_audit_logs' in v_def) > 0);
 
+    -- Migration 009. Taking org_id from the audit row rather than a parameter is
+    -- what makes a cross-tenant signature structurally impossible rather than merely
+    -- unlikely, so it is checked in the deployed body.
+    PERFORM _chk8('org_id is read from the audit row, not accepted as a parameter',
+        position('v_org_id' in v_def) > 0
+        AND position('p_org_id' in v_def) = 0,
+        'v_org_id present: ' || (position('v_org_id' in v_def) > 0)::text
+        || ', p_org_id present: ' || (position('p_org_id' in v_def) > 0)::text);
+    PERFORM _chk8('org_id is written onto the signoff row',
+        position('org_id' in substring(v_def from position('INSERT INTO field_audit_signoffs' in v_def))) > 0);
+    PERFORM _chk8('both audit reads select org_id',
+        (length(v_def) - length(replace(v_def, 'v_org_id', ''))) / length('v_org_id') >= 3,
+        'v_org_id referenced ' ||
+        ((length(v_def) - length(replace(v_def, 'v_org_id', ''))) / length('v_org_id'))::text || ' time(s)');
+
     PERFORM _chk8('the comment records that the lock is deliberate',
         position('FOR UPDATE' in COALESCE(obj_description(
             (SELECT p.oid FROM pg_proc p WHERE p.proname = 'record_signoff' LIMIT 1),
@@ -111,9 +131,15 @@ SELECT lpad(id::text, 3) || '  ' ||
 FROM _v8 ORDER BY id;
 
 \echo ''
-SELECT 'RESULT: ' || count(*) FILTER (WHERE ok) || ' passed, '
-                   || count(*) FILTER (WHERE NOT ok) || ' failed' AS summary
-FROM _v8;
+SELECT count(*) FILTER (WHERE ok) || ' passed, ' || count(*) FILTER (WHERE NOT ok) || ' failed'
+       AS tally FROM _v8;
+-- A verdict rather than a total the reader has to match against a number in a PR
+-- description. Stating an expected count once produced an instruction that said 16
+-- when the script had 15 assertions, which is how people learn to ignore failures.
+SELECT CASE WHEN count(*) FILTER (WHERE NOT ok) = 0
+            THEN 'VERDICT: OK'
+            ELSE 'VERDICT: FAILED — ' || count(*) FILTER (WHERE NOT ok) || ' assertion(s) above' END
+       AS verdict FROM _v8;
 
 ROLLBACK;
 

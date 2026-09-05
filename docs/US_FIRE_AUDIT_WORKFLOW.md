@@ -638,8 +638,10 @@ does.
   and presigned URLs pass, so no code change is needed.
 - **`AI_Field_Audit.json` is dead** — the original 9-node prototype, referenced by
   nothing.
-- **`site_id`'s `'UNKNOWN-SITE'` default is dead code — queued for the next
-  re-import.** `app/api/audit/route.ts` now rejects an empty `site_id` with
+- **✅ `site_id`'s `'UNKNOWN-SITE'` default is gone** — shipped with the migration 009
+  re-import, as queued. `site_id` is now required in the US node too, closing the gap
+  where a caller reaching the webhook directly could still file an unattached audit.
+  Historical note on why it was left in place at first: `app/api/audit/route.ts` now rejects an empty `site_id` with
   `SITE_ID_MISSING` → 400 for **both** regions, so the default in
   `01_validate_input.js` is unreachable through the proxy. India's equivalent
   rejects outright; this should follow, so a direct US caller omitting `site_id` is

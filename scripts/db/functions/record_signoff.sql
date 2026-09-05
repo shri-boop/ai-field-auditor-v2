@@ -1,66 +1,48 @@
 -- ===========================================================================
--- 008 — record_signoff(): lock the audit row before deciding the transition
+-- record_signoff() -- CANONICAL DEFINITION
 -- ===========================================================================
 --
--- A CORRECTNESS FIX TO MIGRATION 007. Apply it.
+-- ⚠️ THIS FILE IS THE CURRENT FUNCTION. Migrations 007 and 008 contain earlier
+-- copies, retained only as the record of what was applied at the time. Do not read
+-- those to learn what the function does.
 --
--- THE BUG
--- -------
--- record_signoff() read the audit row's current signoff_status, checked it against
--- the section 6 transition table, and then wrote. The read took no lock, so
--- check-then-act was not atomic with respect to another caller.
+-- WHY THIS LIVES OUTSIDE THE NUMBERED MIGRATIONS
+-- ----------------------------------------------
+-- By the third change to this function there were three near-identical 230-line
+-- copies across three migration files, and answering "what does record_signoff
+-- actually do?" meant knowing which migration was newest. That is a bad question to
+-- have to ask about the only sanctioned write path to a compliance table, and it gets
+-- worse with every change.
 --
--- Under Postgres' default READ COMMITTED isolation, two concurrent calls against the
--- same audit both read PENDING, both pass the transition check, and both insert a
--- CONFIRMED row. The guard that refuses double-signing -- verified passing in
--- 007_verify.sql -- is bypassable simply by racing it.
+-- CREATE OR REPLACE FUNCTION is idempotent, so a function definition does not need a
+-- migration number -- it needs a single home that is re-applied whenever it changes.
+-- Schema changes still get numbered migrations, because those are one-way.
 --
--- WHY THIS IS NOT THEORETICAL HERE
--- --------------------------------
---   * Bulk desk review (section 8) is many calls at once, by design.
---   * A double-clicked button in the sign-off UI (step 7) is two calls.
---   * n8n retries. LOG_Audit already carries retryOnFail with maxTries 3, and the
---     sign-off workflow at step 5 will be built in the same style.
+-- INSTALL ORDER
+--   1. migrations 001..009, in order
+--   2. then this file (and anything else in scripts/db/functions/)
+--   3. re-apply this file after any change to it
 --
--- The outcome would be two valid-looking signatures on one audit, potentially by
--- different people with different attestations, in an append-only table that cannot
--- be tidied up afterwards -- on the one table in this system where being wrong has
--- legal consequences.
+-- WHAT IT DOES
+--   Performs the sign-off history INSERT and the audit-row UPDATE in one call, so
+--   they cannot half-commit (SIGNOFF_DESIGN 14.6), and enforces server-side:
+--     * the section 6 transition table, with a catch-all refusal so a status added
+--       later fails closed rather than becoming silently signable
+--     * section 10 roles -- only TECHNICIAN and SUPERVISOR may sign
+--     * section 8 bulk rules -- never bulk for FIELD_VERIFIED, CRITICAL, or a
+--       suspected impairment
+--     * section 5 and 15 expiry controls, including the verification review date
+--       that replaces an expiry for a PERPETUAL credential
+--     * FOR UPDATE on the audit row before the transition is evaluated, so
+--       check-then-act is atomic against a concurrent caller (migration 008)
+--     * org_id copied from the audit row, so a signature inherits the tenant scope
+--       of what it signs and cannot be attributed elsewhere (migration 009)
 --
--- Note what did NOT catch this: 44 passing assertions in 007_verify.sql. Every one
--- of them runs in a single session, and a single-session harness cannot observe a
--- race. Those 44 passes were evidence the function was correct when nobody else was
--- calling it, which is not the same claim.
+-- Verify with scripts/db/functions/record_signoff_verify.sql, which inspects the
+-- DEPLOYED function rather than this file -- only the deployed one runs.
 --
--- THE FIX
--- -------
--- SELECT ... FOR UPDATE on the audit row. The second caller blocks until the first
--- commits, then re-reads the now-CONFIRMED status and is refused by the transition
--- check that was already there. No new logic and no new failure mode -- the existing
--- check simply now reads a value nobody can change underneath it.
---
--- The lock is on the AUDIT row rather than on field_audit_signoffs, deliberately.
--- The audit is both the thing being signed and the thing whose status gates the
--- transition, so it is the correct serialisation point. Locking the history table
--- would serialise unrelated sign-offs against each other for no benefit.
---
--- WHY A NEW MIGRATION RATHER THAN EDITING 007
--- -------------------------------------------
--- 007 is already applied to production. Editing it in place would leave a database
--- that ran the old definition indistinguishable from one that ran the new definition
--- as far as source control is concerned -- the silent-divergence failure this
--- project has already been bitten by twice. 007 keeps its definition as the record
--- of what was applied, marked superseded; this file is authoritative.
---
--- Idempotent: CREATE OR REPLACE FUNCTION, no schema change, no data change. Safe to
--- re-run, and safe to apply while the system is live -- it replaces a function
--- definition and takes no long locks.
+-- Idempotent. No schema change, no data change. Safe to apply while live.
 -- ===========================================================================
-
--- ⚠️ SUPERSEDED BY scripts/db/functions/record_signoff.sql, which is now the single
--- canonical definition. The copy below is retained as the record of what was applied
--- when this migration ran; it predates org_id propagation (migration 009). Do not
--- read it to learn what the function currently does.
 
 BEGIN;
 
@@ -89,6 +71,7 @@ DECLARE
     v_prior_id      bigint;
     v_new_id        bigint;
     v_kind          text := p_signoff_kind;
+    v_org_id        text;
 BEGIN
     -- ---------------------------------------------------------------- inputs
     IF p_region NOT IN ('US', 'IND') THEN
@@ -120,15 +103,19 @@ BEGIN
     -- caller: under READ COMMITTED two concurrent calls both see PENDING, both pass
     -- the check, and both write CONFIRMED. The lock makes the second caller wait,
     -- re-read CONFIRMED, and be refused as it should be.
+    --
+    -- org_id is read here too (migration 009). Taking it from the audit row rather
+    -- than from a parameter means a sign-off structurally cannot be attributed to a
+    -- different tenant than the audit it signs.
     IF p_region = 'US' THEN
-        SELECT TRUE, signoff_status, critical, impairment_suspected
-          INTO v_exists, v_current, v_critical, v_impairment
+        SELECT TRUE, signoff_status, critical, impairment_suspected, org_id
+          INTO v_exists, v_current, v_critical, v_impairment, v_org_id
           FROM field_audit_us_logs
          WHERE audit_id = p_audit_id
            FOR UPDATE;
     ELSE
-        SELECT TRUE, signoff_status, COALESCE(critical, FALSE), FALSE
-          INTO v_exists, v_current, v_critical, v_impairment
+        SELECT TRUE, signoff_status, COALESCE(critical, FALSE), FALSE, org_id
+          INTO v_exists, v_current, v_critical, v_impairment, v_org_id
           FROM field_audit_logs
          WHERE audit_id = p_audit_id
            FOR UPDATE;
@@ -250,6 +237,7 @@ BEGIN
 
     -- ------------------------------------------------------------- the writes
     INSERT INTO field_audit_signoffs (
+        org_id,
         region, audit_id, action, signoff_kind,
         audit_jurisdiction, eligibility_reason, signing_authority,
         actor_account_id, actor_name, actor_email, actor_role,
@@ -259,6 +247,10 @@ BEGIN
         firm_name, firm_licence_no, firm_licence_expiry, firm_licence_category,
         attestation, reason_code, notes, supersedes, bulk
     ) VALUES (
+        -- Copied from the audit row read above, never taken as a parameter: a
+        -- signature must inherit the scope of the thing it signs, and a caller
+        -- supplying its own org_id is exactly the cross-tenant write to prevent.
+        v_org_id,
         p_region, p_audit_id, p_action, v_kind,
         p_snapshot ->> 'audit_jurisdiction',
         p_snapshot ->> 'eligibility_reason',
@@ -305,21 +297,11 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION record_signoff(text, text, text, text, text, text, text, text,
                                    text, jsonb, boolean, boolean) IS
-    'The only sanctioned write path for a sign-off. Performs the history INSERT and '
-    'the audit-row UPDATE atomically (SIGNOFF_DESIGN 14.6), locks the audit row with '
-    'FOR UPDATE before evaluating the section 6 transition table (migration 008), and '
-    'enforces the section 8 bulk rules and the section 5 / 15 expiry controls. '
-    'Do not INSERT into field_audit_signoffs directly.';
+    'CANONICAL: scripts/db/functions/record_signoff.sql. The only sanctioned write '
+    'path for a sign-off. History INSERT and audit-row UPDATE are atomic '
+    '(SIGNOFF_DESIGN 14.6); the audit row is locked with FOR UPDATE before the '
+    'section 6 transition table is evaluated (migration 008); org_id is copied from '
+    'the audit row rather than accepted as a parameter (migration 009). Do not INSERT '
+    'into field_audit_signoffs directly.';
 
 COMMIT;
-
--- ===========================================================================
--- VERIFY
--- ===========================================================================
---   docker exec -i ai-stack-postgres-1 sh -c \
---     'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < scripts/db/008_verify.sql
---
--- That confirms the deployed function really carries the lock, and prints the
--- two-session procedure for watching the race be refused -- which no single-session
--- script can test.
--- ===========================================================================

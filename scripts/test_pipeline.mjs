@@ -201,6 +201,35 @@ function rejectionOf(bodyOverrides) {
 }
 
 // ===========================================================================
+section('1c. site_id is required, and org_id is never caller-supplied');
+{
+  // The 'UNKNOWN-SITE' default is gone. It became unreachable when /api/audit
+  // started rejecting an empty site_id for both regions, and a direct webhook caller
+  // could still have filed an unattached audit through it.
+  const missing = runPipeline({ ...baseBody, site_id: undefined }, cleanModelEarly).rejected;
+  check('a missing site_id is rejected, not defaulted',
+    missing && missing.validation_error_code === 'SITE_ID_MISSING', missing && missing.validation_error_code);
+  check('a blank site_id is rejected too',
+    runPipeline({ ...baseBody, site_id: '   ' }, cleanModelEarly).rejected.validation_error_code === 'SITE_ID_MISSING');
+  check('the rejection explains the consequence, not just the rule',
+    /retriev|bill|compliance record/i.test(missing.validation_error), missing.validation_error);
+  check('no audit is filed against the old invented placeholder',
+    runPipeline(baseBody, cleanModelEarly).validated.site_id !== 'UNKNOWN-SITE');
+  check('a rejected site_id never reaches the vision model',
+    runPipeline({ ...baseBody, site_id: '' }, cleanModelEarly).payload === undefined);
+
+  // Migration 009: a tenant scope the caller chooses is not a scope.
+  const spoofed = runPipeline(
+    { ...baseBody, org_id: 'ORG-SOMEONE-ELSE', organisation_id: 'ORG-SOMEONE-ELSE' },
+    cleanModelEarly).validated;
+  check('org_id in the body is ignored, not honoured',
+    spoofed.org_id === undefined && spoofed.organisation_id === undefined,
+    JSON.stringify({ org_id: spoofed.org_id, organisation_id: spoofed.organisation_id }));
+  check('nothing in the validated output carries a caller-supplied tenant scope',
+    JSON.stringify(spoofed).indexOf('SOMEONE-ELSE') === -1);
+}
+
+// ===========================================================================
 section('2. Jurisdiction resolution (the core US difference)');
 
 const cleanModel = jsonOf({
