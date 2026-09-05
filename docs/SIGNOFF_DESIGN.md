@@ -682,3 +682,124 @@ Revised step 1, therefore: registry with Florida verified, `IN-MH` as a stub fla
 `requires_confirmation: true`, and both new fields present from the start. `IN-MH`
 seeded as a stub is what proves the two-authority model actually holds before any of
 it is load-bearing.
+
+
+---
+
+## 15. Verification provenance — resolving `evidence_on_file`
+
+§14.3 proposed that a `PERPETUAL` credential substitutes `evidence_on_file: true`
+for an expiry check. **As a boolean that is a softer version of the problem §5
+exists to close**, and it does not survive the question "who set it, when, and can
+that be audited?". An unaudited flag that unlocks field verification is worse than
+no flag, for the same reason an expired signature is worse than an unsigned one: it
+looks like a control.
+
+Resolved, and built in step 1 rather than retrofitted.
+
+### 15.1 A verification is itself an attestation
+
+It is a claim by a named human that must remain true forever, which makes it the
+same kind of object as a sign-off — so it obeys the same three rules §2 and §6
+already establish:
+
+| Rule | Consequence for verification |
+|---|---|
+| Attributable | names the person who performed it, not a system default |
+| Snapshotted | captures the verifier's name as it stood, per §2 |
+| Append-only | a re-verification is a new row; a verification is never edited, per §6 |
+
+Concretely, replacing the boolean:
+
+```
+subject_account_id        whose credential this is
+verified_by_account_id    who checked it
+verified_by_name          snapshot, because §2 applies here too
+verified_at               timestamptz
+method                    enum, see §15.3
+document_ref              pointer to the stored artefact
+source_detail             which register was checked, or which document was seen
+```
+
+### 15.2 Separation of duties, and the self-verification bar
+
+§10 already separates administering the system from attesting to an inspection:
+`ADMIN` manages credentials and **cannot sign**. Verification is the mirror of
+that — an `ADMIN` act, not a `TECHNICIAN` one.
+
+And a holder may never verify their own credential. Without that single rule the
+whole mechanism is theatre: anyone able to grant themselves
+`evidence_on_file: true` has an expiry check they can switch off. Enforced in code,
+not policy — `assessVerification` returns `SELF_VERIFIED` when the subject and the
+verifier are the same account.
+
+### 15.3 Method is graded, and sufficiency is a jurisdiction's judgement
+
+"I looked at a scan" and "I checked the issuing authority's register" are not the
+same evidence and should not produce the same permission.
+
+| Method | Rank | Is it verification? |
+|---|---|---|
+| `SELF_DECLARED` | 0 | **No** — recorded so it can be refused |
+| `SCANNED_COPY` | 1 | Yes |
+| `CERTIFIED_COPY` | 2 | Yes |
+| `ORIGINAL_DOCUMENT_SEEN` | 3 | Yes |
+| `PRIMARY_SOURCE_REGISTER` | 4 | Yes |
+
+`SELF_DECLARED` exists precisely to be rejected. It is not weak verification, it is
+the absence of it — and storing it explicitly is more honest than an empty field,
+because "nobody has checked this" is a fact worth keeping.
+
+Each jurisdiction sets `minimum_verification_rank`, because sufficiency is a
+per-jurisdiction call and belongs in registry data like everything else. Florida's
+floor is `SCANNED_COPY`; **`IN-MH`'s is `CERTIFIED_COPY`**, deliberately higher —
+there the verification is doing the work an expiry date would otherwise do, so it
+has to carry more weight.
+
+### 15.4 The answer to "isn't this still just a flag?": the expiry moves, it does not vanish
+
+This is the part that makes `PERPETUAL` safe. The **credential** does not expire.
+**Our confidence in the record does.**
+
+So every verification carries a review date, derived from the jurisdiction's
+`verification_review_months` (Florida 12, `IN-MH` 24). When it lapses the
+credential falls back to `DESK_REVIEW` — exactly as an expired credential would.
+
+§5 is therefore not weakened for perpetual credentials and not skipped: **the same
+gate fires, reading a different date.** A qualification verified once in 2026 and
+never revisited does not stay eligible; it goes `VERIFICATION_STALE` and appears in
+the same §5 dashboard as an expiring licence.
+
+That is what stops `PERPETUAL` becoming the value everyone selects to escape the
+expiry gate — selecting it does not remove a date, it exchanges one date for
+another that someone must actively maintain.
+
+### 15.5 Nothing is verified by omission
+
+Absent verification fails closed (`VERIFICATION_ABSENT`), mirroring
+`edition_verified: false` and `requires_confirmation: true`: this codebase does not
+treat silence as assurance.
+
+### 15.6 What step 1 actually shipped
+
+`lib/credential-registry.mjs` and `scripts/test_credentials.mjs` — **80 offline
+assertions**, no database, no network, no n8n, asserted as such by section 9 of the
+suite.
+
+- `signing_authority` and `expiry_semantics` present from the first commit, per
+  §14.10
+- Florida seeded verified; **statute references confirmed, renewal intervals and
+  dealer class-to-equipment mappings explicitly not**, each carrying
+  `requires_confirmation: true` at the level it appears
+- `IN-MH` seeded as a stub — which is what proves the `FIRM` path holds before
+  anything depends on it, rather than letting it rot untested until the first
+  Indian customer
+- Registry keys identical to `CODE_BASIS_REGISTRY`, asserted in the suite, so §4
+  needs no translation layer
+- A stub jurisdiction can never yield `FIELD_VERIFIED` — it returns
+  `JURISDICTION_UNCONFIRMED`
+
+Deliberately **not** built: the n8n copy. It is needed at step 6, and when it is,
+generate it from this file with a `--check` rather than hand-copying. A second
+hand-maintained copy of licensing data is the same class of divergence as renaming
+a node in the n8n UI.
