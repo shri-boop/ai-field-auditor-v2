@@ -135,8 +135,12 @@ explains itself better with the history attached.
 3. **Caller-supplied fields are not scopes.** `site_id` is caller-supplied, which is
    why `org_id` exists and why both `VALIDATE_Input` nodes ignore it in the request
    body.
-4. **The committed artifact and the live workflow can diverge.** Both have happened —
-   a stale workflow name, and a UI-only node rename.
+4. **The committed artifact and the live workflow can diverge.** Three instances so
+   far: a stale workflow name, a UI-only node rename, and `settings.errorWorkflow`
+   which the artifact carries but which arrived **blank** in n8n after import. A
+   structural assertion proves what the file says, never what the running system
+   does — so anything set via workflow *settings* needs confirming in the UI after
+   every import.
 5. **`new URL()` throws in the n8n Code node.** The offline harnesses shadow `URL`,
    `Buffer`, `process` and `fetch` as undefined to reproduce that.
 6. **Telegram rejects the whole message on an unsupported HTML tag.** The email

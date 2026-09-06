@@ -99,15 +99,36 @@ const error_message = firstString([
   j.message
 ], 'An unexpected error occurred while processing this request.');
 
-// The node name is best-effort here. Precise attribution is the shared
-// Error_Handler workflow's job — n8n hands IT the failing node directly, which is
-// something an in-workflow node cannot see reliably.
+/**
+ * The failing node's name.
+ *
+ * `$prevNode.name` is the reliable source and the others are fallbacks, which is the
+ * reverse of what the first version of this file assumed. In practice n8n hands the
+ * error branch an item whose `error` is a plain STRING — verified on a live forced
+ * failure, where every structured candidate below came back empty and this node
+ * reported "unknown". `$prevNode` is the node that fed this input, which for an
+ * error output is by definition the node that failed.
+ *
+ * Guarded with `typeof` rather than assumed: `typeof` on an undeclared identifier
+ * returns 'undefined' instead of throwing, so this is safe in a restricted `vm`
+ * where the global may be absent, and safe in the offline harness which does not
+ * provide it.
+ */
+const prev = typeof $prevNode !== 'undefined' && $prevNode ? $prevNode : null;
+
 const error_node = firstString([
+  prev && prev.name,
   raw.node && typeof raw.node === 'object' ? raw.node.name : null,
   typeof raw.node === 'string' ? raw.node : null,
   raw.nodeName,
   j.error_node
 ], 'unknown');
+
+// Output 1 on a node with continueErrorOutput is its error branch, so this
+// distinguishes "the node threw" from "a router sent us its fallback".
+const error_output_index = prev && typeof prev.outputIndex === 'number'
+  ? prev.outputIndex
+  : null;
 
 const error_type = firstString([
   raw.name,
@@ -123,10 +144,38 @@ const workflow_name = typeof $workflow !== 'undefined' && $workflow && $workflow
   ? String($workflow.name)
   : 'unknown';
 
-// Carried through when the failure happened after VALIDATE_Input, so a support
-// request has something to quote and the row can be found later.
-const audit_id = firstString([j.audit_id, raw.audit_id], null);
-const site_id = firstString([j.site_id, raw.site_id], null);
+/**
+ * Identity, so a support request has something to quote and the row can be found.
+ *
+ * The error item carries the FAILING node's input, not the original request. When
+ * SHAPE_Response fails its input is LOG_Audit's row echo, which has an `id` but no
+ * `audit_id` and no `site_id` — verified on a live forced failure, where both came
+ * back null and the response was consequently untraceable.
+ *
+ * So fall back to reading the validator by name. The try/catch is deliberate and
+ * narrow: `$('NodeName')` throws when that node has not executed, which is exactly
+ * the case when the validator itself is what failed. Swallowing that is correct
+ * here because this is optional enrichment — an error handler that threw while
+ * reaching for a nicety would produce the silent failure it exists to prevent.
+ *
+ * Both regions' validators are tried because this one file serves all three
+ * workflows; History has no audit_id at all, and null is the honest answer there.
+ */
+function fromValidator(field) {
+  const names = ['VALIDATE_Input', 'VALIDATE_Query'];
+  for (let i = 0; i < names.length; i++) {
+    try {
+      const v = $(names[i]).first().json[field];
+      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 200);
+    } catch (e) {
+      // That node did not run in this execution. Try the next.
+    }
+  }
+  return null;
+}
+
+const audit_id = firstString([j.audit_id, raw.audit_id], null) || fromValidator('audit_id');
+const site_id = firstString([j.site_id, raw.site_id], null) || fromValidator('site_id');
 
 const timestamp = new Date().toISOString();
 
@@ -141,6 +190,7 @@ return [{
     // ---- what item 5 requires an error handler to capture ------------------
     error_type: error_type,
     error_node: error_node,
+    error_output_index: error_output_index,
     error_message: error_message,
     workflow_name: workflow_name,
 
