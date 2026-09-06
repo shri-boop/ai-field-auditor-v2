@@ -31,6 +31,39 @@ ERROR_WORKFLOW_ID = "iLRmjyuk5mq1hqkB"
 ERROR_HANDLER_NAME = "ERROR_Handler"
 RESPOND_ERROR_NAME = "RESPOND_Error"
 
+# ---------------------------------------------------------------- Part B
+# settings.errorWorkflow alone alerts nobody for the failures this workflow is built
+# to survive: n8n invokes it only when an execution ends in status *error*, and every
+# node here routes its error output to ERROR_Handler, so the execution ends
+# SUCCESSFUL. A Postgres outage on QUERY_US or QUERY_IND therefore produced a clean
+# 500 for the caller and total silence for the operator.
+#
+# History has no audit_id and no site_id, so run_id and client_id honestly report
+# 'unknown' — see scripts/nodes/shared_error_alert.js. The workflow name and failing
+# node are what make the row useful here.
+ERROR_ALERT_NAME = "BUILD_ErrorAlert"
+ERROR_ALERT_FILE = "shared_error_alert.js"
+CALL_ERROR_HANDLER_NAME = "CALL_ErrorHandler"
+
+# Post-response and NEVER retried: a retry would re-run Error_Handler's LLM diagnosis
+# and all three of its alert nodes, logging and alerting one failure twice.
+POST_RESPONSE_NO_RETRY = [ERROR_ALERT_NAME, CALL_ERROR_HANDLER_NAME]
+
+
+def execute_error_workflow_params():
+    """The executeWorkflow block for calling the shared Error_Handler.
+
+    Copied from the shape already running in production (50 workflows in
+    agentic-dev-stack use exactly this typeVersion 1.1 form) rather than written from
+    the node documentation. waitForSubWorkflow: false is load-bearing: Error_Handler
+    makes a 10-30 s LLM call, and waiting would hold this execution open long after
+    the caller was answered.
+    """
+    return {
+        "workflowId": {"__rl": True, "value": ERROR_WORKFLOW_ID, "mode": "id"},
+        "options": {"waitForSubWorkflow": False},
+    }
+
 # This workflow had the starkest gap of the three. QUERY_US and QUERY_IND are
 # Postgres reads with NO retry and NO onError, so a transient connection blip
 # stopped the workflow outright and the Records lookup returned nothing at all --
@@ -353,6 +386,22 @@ def build():
             "type": "n8n-nodes-base.respondToWebhook",
             "typeVersion": 1,
             "position": [880, 620],
+            # Guarantees an item on the output so the Part B chain cannot silently
+            # stop. What a respondToWebhook emits is not assumed here; BUILD_ErrorAlert
+            # reads $('ERROR_Handler'), so an empty item is harmless.
+            "alwaysOutputData": True,
+        },
+        # ------------------------------------------------------------------ Part B
+        # Downstream of the responder rather than a second branch off ERROR_Handler,
+        # because only that GUARANTEES the caller is answered first.
+        code_node("0011-erroralert", ERROR_ALERT_NAME, ERROR_ALERT_FILE, [1100, 620]),
+        {
+            "parameters": execute_error_workflow_params(),
+            "id": "0012-callerrh",
+            "name": CALL_ERROR_HANDLER_NAME,
+            "type": "n8n-nodes-base.executeWorkflow",
+            "typeVersion": 1.1,
+            "position": [1320, 620],
         },
         {
             "parameters": {
@@ -445,6 +494,21 @@ def build():
     connections[ERROR_HANDLER_NAME] = {
         "main": [[{"node": RESPOND_ERROR_NAME, "type": "main", "index": 0}]]
     }
+
+    # Part B. CALL_ErrorHandler is a LEAF on purpose: n8n permits one response per
+    # execution, so nothing downstream of it may be a responder.
+    connections[RESPOND_ERROR_NAME] = {
+        "main": [[{"node": ERROR_ALERT_NAME, "type": "main", "index": 0}]]
+    }
+    connections[ERROR_ALERT_NAME] = {
+        "main": [[{"node": CALL_ERROR_HANDLER_NAME, "type": "main", "index": 0}]]
+    }
+
+    for name in POST_RESPONSE_NO_RETRY:
+        node = next(n for n in nodes if n["name"] == name)
+        node["onError"] = "continueRegularOutput"
+        node["alwaysOutputData"] = True
+        node["retryOnFail"] = False
 
     return {
         "name": "AI_Field_Audit_History",

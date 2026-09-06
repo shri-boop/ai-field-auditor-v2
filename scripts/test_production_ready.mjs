@@ -39,8 +39,16 @@ const ERROR_WORKFLOW_ID = 'iLRmjyuk5mq1hqkB';
  */
 const POST_RESPONSE = new Set([
   'SEND_Slack', 'SEND_Telegram', 'SEND_Email', 'CREATE_WorkOrder',
-  'NOTIFY_OpsManager', 'Send a message'
+  'NOTIFY_OpsManager', 'Send a message',
+  // Part B. These sit AFTER RESPOND_Error and are the reason a caught error reaches
+  // an operator at all — see the Part B section below. They are leaves by design, so
+  // they belong in this set for exactly the same reason the notifiers do.
+  'BUILD_ErrorAlert', 'CALL_ErrorHandler'
 ]);
+
+/** Part B node names, asserted structurally and executed further down. */
+const ERROR_ALERT = 'BUILD_ErrorAlert';
+const CALL_ERROR_HANDLER = 'CALL_ErrorHandler';
 
 /** Disabled leftovers, excluded from reachability. */
 const ORPHANED = new Set(['EXTRACT_Base64', 'DOWNLOAD_Image']);
@@ -101,8 +109,13 @@ for (const spec of WORKFLOWS) {
   // ---------------------------------------------------------------- item 2
   // Every node that can fail needs an error path. ERROR_Handler is the documented
   // exception: giving the error handler its own error output would be circular.
+  // executeWorkflow is in this list because CALL_ErrorHandler calls a workflow that
+  // makes an LLM request and three API calls. Without an onError policy its failure
+  // would end the execution in status *error* AFTER the caller was already answered —
+  // which would then fire the native errorTrigger and log the failure as
+  // "CALL_ErrorHandler", masking the real error that started it all.
   const failable = live.filter((n) =>
-    /httpRequest|postgres|\.code$|telegram|slack|gmail/.test(n.type) &&
+    /httpRequest|postgres|\.code$|telegram|slack|gmail|executeWorkflow/.test(n.type) &&
     n.name !== 'ERROR_Handler');
   const missing = failable.filter((n) => !n.onError).map((n) => n.name);
   check('item 2: every failable node has an onError policy',
@@ -215,6 +228,61 @@ for (const spec of WORKFLOWS) {
   check('executionOrder is v1, so branch order is deterministic',
     (wf.settings || {}).executionOrder === 'v1');
   check('no pinData in the artifact', wf.pinData === undefined);
+
+  // ------------------------------------------------------------------ Part B
+  // errorWorkflow above is NOT sufficient, and this block is the reason.
+  //
+  // n8n invokes settings.errorWorkflow only when an execution ends in status *error*.
+  // Every pre-response node here carries onError: continueErrorOutput, so its failure
+  // is CAUGHT, RESPOND_Error answers, and the execution ends SUCCESSFUL — the shared
+  // Error_Handler is never called. Before Part B the error path was
+  // ERROR_Handler -> RESPOND_Error -> nothing: a structured 500 for the caller and
+  // total silence for the operator.
+  const alert = wf.nodes.find((n) => n.name === ERROR_ALERT);
+  const call = wf.nodes.find((n) => n.name === CALL_ERROR_HANDLER);
+  check('Part B: ' + ERROR_ALERT + ' exists and is a Code node',
+    !!alert && alert.type === 'n8n-nodes-base.code', alert ? alert.type : '(missing)');
+  check('Part B: ' + CALL_ERROR_HANDLER + ' exists and is an executeWorkflow node',
+    !!call && call.type === 'n8n-nodes-base.executeWorkflow', call ? call.type : '(missing)');
+  check('Part B: it calls the SHARED Error_Handler, not a copy',
+    !!call && ((call.parameters.workflowId || {}).value === ERROR_WORKFLOW_ID),
+    call ? JSON.stringify(call.parameters.workflowId) : '(missing)');
+  // Without this the audit execution stays open for the 10-30 s LLM diagnosis,
+  // holding a worker slot long after the caller was answered.
+  check('Part B: waitForSubWorkflow is false, so the diagnosis is fire-and-forget',
+    !!call && (call.parameters.options || {}).waitForSubWorkflow === false,
+    call ? JSON.stringify(call.parameters.options) : '(missing)');
+
+  // The ordering guarantee. A second branch off ERROR_Handler would be ordered by
+  // n8n's execution-order heuristics; downstream-of-the-responder is a guarantee.
+  const chain = (from) => (((wf.connections[from] || {}).main || [[]])[0] || [])
+    .map((c) => c.node);
+  check('Part B: ERROR_Handler answers the caller FIRST',
+    chain('ERROR_Handler').includes('RESPOND_Error'), chain('ERROR_Handler').join(','));
+  check('Part B: the alert chain hangs off RESPOND_Error, not off ERROR_Handler',
+    chain('RESPOND_Error').join(',') === ERROR_ALERT, chain('RESPOND_Error').join(','));
+  check('Part B: ' + ERROR_ALERT + ' feeds ' + CALL_ERROR_HANDLER,
+    chain(ERROR_ALERT).join(',') === CALL_ERROR_HANDLER, chain(ERROR_ALERT).join(','));
+  // RESPOND_Error emitting nothing would silently break the chain. What a
+  // respondToWebhook node outputs is not assumed anywhere in this repo.
+  const responderNode = wf.nodes.find((n) => n.name === 'RESPOND_Error');
+  check('Part B: RESPOND_Error keeps emitting an item so the chain cannot stall',
+    !!responderNode && responderNode.alwaysOutputData === true,
+    String(responderNode && responderNode.alwaysOutputData));
+  check('Part B: ' + CALL_ERROR_HANDLER + ' is a LEAF (one response per execution)',
+    chain(CALL_ERROR_HANDLER).length === 0, chain(CALL_ERROR_HANDLER).join(','));
+
+  // ⚠️ The subtle one. POST_RESPONSE_TOLERANT sets retryOnFail with maxTries 2, which
+  // is right for a Telegram 429 and WRONG here: a retried CALL_ErrorHandler re-runs
+  // Error_Handler's LLM diagnosis and all three of its alert nodes, so one failure
+  // becomes two error_log rows and two Telegram messages. Asserted as strictly
+  // === false rather than falsy, because the builders set it explicitly so that a
+  // future edit has to argue with a comment before turning it on.
+  [ERROR_ALERT, CALL_ERROR_HANDLER].forEach((name) => {
+    const n = wf.nodes.find((x) => x.name === name);
+    check('Part B: ' + name + ' is never retried (a retry would double-alert)',
+      !!n && n.retryOnFail === false, n ? String(n.retryOnFail) : '(missing)');
+  });
 }
 
 // ===========================================================================
@@ -353,6 +421,131 @@ section('=== error handler, executed against the shape n8n really provides ===')
   check('falls back to "unknown" for the node rather than throwing',
     empty.error_node === 'unknown');
   check('never emits an undefined timestamp', typeof empty.timestamp === 'string');
+}
+
+// ===========================================================================
+section('=== Part B: the alert payload, executed ===');
+{
+  const src = readFileSync(join(REPO, 'scripts', 'nodes', 'shared_error_alert.js'), 'utf8');
+
+  WORKFLOWS.forEach((spec) => {
+    const wf = JSON.parse(readFileSync(join(REPO, spec.file), 'utf8'));
+    const node = wf.nodes.find((n) => n.name === ERROR_ALERT);
+    check(spec.label + ' uses the shared alert builder verbatim',
+      !!node && node.parameters.jsCode === src);
+  });
+
+  const ABSENT = ['URL', 'URLSearchParams', 'require', 'process', 'fetch', 'Buffer'];
+  const fn = new Function('$', '$workflow', '$execution', ...ABSENT, src);
+
+  /** @param handler what $('ERROR_Handler') resolves to, or null to make it throw. */
+  function run(handler, wfId, exId) {
+    const ref = (n) => {
+      if (n !== 'ERROR_Handler') throw new Error('not executed: ' + n);
+      if (handler === null) throw new Error('node not executed: ERROR_Handler');
+      return { all: () => [{ json: handler }], first: () => ({ json: handler }) };
+    };
+    return fn(ref, wfId === undefined ? { id: 'WF9' } : wfId,
+              exId === undefined ? { id: '231' } : exId,
+              ...ABSENT.map(() => undefined))[0].json;
+  }
+
+  // The realistic India case, taken from the live ERROR_Handler output the owner
+  // captured: SHAPE_Response threw and identity WAS recovered.
+  const india = run({
+    success: false,
+    error: 'forced error-path test [line 44]',
+    error_message: 'forced error-path test [line 44]',
+    error_type: 'WORKFLOW_ERROR',
+    error_node: 'SHAPE_Response',
+    workflow_name: 'AI_Field_Audit_V2',
+    audit_id: 'FA-IN-20260906-0538023E-L2JQH',
+    site_id: 'SITE-MUM-563'
+  });
+
+  // ⚠️ THE CONTRACT. Error_Handler.GENERATE_ErrorID reads a FLAT payload by these
+  // exact names. Its other entry point — the native Error Trigger — receives a
+  // completely different shape, and a field named even slightly wrong here does not
+  // error: it silently logs 'unknown', which is the failure mode this whole
+  // workstream started with. So the key SET is asserted, not just the values.
+  check('emits exactly the field names GENERATE_ErrorID reads',
+    JSON.stringify(Object.keys(india).sort()) === JSON.stringify([
+      'client_id', 'error_message', 'error_node', 'error_type',
+      'execution_url', 'run_id', 'workflow_name'].sort()),
+    Object.keys(india).sort().join(','));
+
+  check('run_id carries the audit_id, so a row is traceable to one audit',
+    india.run_id === 'FA-IN-20260906-0538023E-L2JQH', india.run_id);
+  check('client_id carries the site_id, so a row is traceable to one building',
+    india.client_id === 'SITE-MUM-563', india.client_id);
+  check('the failing node survives into the alert',
+    india.error_node === 'SHAPE_Response', india.error_node);
+  check('the workflow name survives into the alert',
+    india.workflow_name === 'AI_Field_Audit_V2', india.workflow_name);
+  check('builds a direct link to the failed execution',
+    india.execution_url === 'https://n8n.kratuailabs.com/workflow/WF9/executions/231',
+    india.execution_url);
+
+  // A wrong link is worse than none: Error_Handler omits the line entirely on ''.
+  check('emits an EMPTY url rather than a broken one when the execution id is absent',
+    run({ workflow_name: 'W' }, { id: 'WF9' }, undefined) &&
+    run({ workflow_name: 'W' }, { id: 'WF9' }, null).execution_url === '',
+    JSON.stringify(run({ workflow_name: 'W' }, { id: 'WF9' }, null).execution_url));
+  check('and when the workflow id is absent',
+    run({ workflow_name: 'W' }, null, { id: '231' }).execution_url === '');
+
+  // History has neither an audit_id nor a site_id. 'unknown' is the honest answer;
+  // inventing an identifier would be worse than admitting there is none.
+  const history = run({
+    error_message: 'connection refused', error_type: 'NodeApiError',
+    error_node: 'QUERY_IND', workflow_name: 'AI_Field_Audit_History',
+    audit_id: null, site_id: null
+  });
+  check('History reports unknown identity honestly rather than inventing one',
+    history.run_id === 'unknown' && history.client_id === 'unknown',
+    history.run_id + '/' + history.client_id);
+  check('History still carries the failing node and workflow',
+    history.error_node === 'QUERY_IND' &&
+    history.workflow_name === 'AI_Field_Audit_History');
+  check('a structured error type is preserved', history.error_type === 'NodeApiError');
+
+  // ERROR_Handler emits `error` as well as `error_message`; either must work.
+  check('falls back to the `error` key when error_message is absent',
+    run({ error: 'boom' }).error_message === 'boom',
+    run({ error: 'boom' }).error_message);
+
+  // Absolute worst case: $('ERROR_Handler') throws. This node must NOT become the
+  // second failure — an error handler that dies while reporting an error manufactures
+  // exactly the silence it exists to prevent.
+  const broken = run(null);
+  check('does not throw when ERROR_Handler cannot be read', !!broken);
+  check('still produces every contract field in that case',
+    ['workflow_name', 'run_id', 'client_id', 'error_node', 'error_message',
+     'error_type', 'execution_url'].every((k) => k in broken));
+  check('and SAYS the lookup failed rather than silently reporting "unknown"',
+    /could not read ERROR_Handler/.test(broken.error_message), broken.error_message);
+
+  // Bound the message: it is bound into an INSERT and then into three alert channels.
+  const long = run({ error_message: 'x'.repeat(5000), workflow_name: 'W' });
+  check('caps error_message so one failure cannot bloat the INSERT or the alert',
+    long.error_message.length === 2000, String(long.error_message.length));
+
+  // Empty strings must degrade to the fallbacks, not to ''. A blank workflow_name in
+  // error_log is indistinguishable from a bug in the logger.
+  const blank = run({ workflow_name: '  ', error_node: '', audit_id: '   ' });
+  check('whitespace-only values degrade to the documented fallbacks',
+    blank.workflow_name === 'unknown' && blank.error_node === 'unknown' &&
+    blank.run_id === 'unknown',
+    [blank.workflow_name, blank.error_node, blank.run_id].join('/'));
+
+  // Same discipline as the shared handler: it must not do the async workflow's job.
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => l.trim().startsWith('//') === false && l.trim().startsWith('*') === false)
+    .join('\n');
+  check('it does not diagnose, log, or alert — it only builds the payload',
+    /openrouter|INSERT INTO|telegram|fetch\(/i.test(code) === false);
 }
 
 console.log('\n' + '='.repeat(64));

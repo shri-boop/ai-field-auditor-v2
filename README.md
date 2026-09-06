@@ -34,7 +34,7 @@ multi-tenancy has to be designed for before it is needed.
 | US audit pipeline | ✅ live — same plus 9 jurisdictions, 9 equipment classes, OSHA overlay, SLA tiers |
 | Records / history | ✅ live — read-only lookup over both logs |
 | Webhook auth | ✅ all three require Header Auth; unauthenticated returns 403 |
-| Production hardening | ✅ central error handler, no silent paths, all switch fallbacks wired, `errorWorkflow` set — see [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) |
+| Production hardening | ✅ central error handler, no silent paths, all switch fallbacks wired, and caught errors now alert an operator via `CALL_ErrorHandler` — see [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) |
 | Sign-off — credential registry | ✅ `lib/credential-registry.mjs`, FL verified, everything else flagged stubs |
 | Sign-off — history table + write path | ✅ `field_audit_signoffs`, append-only, atomic row-locked `record_signoff()` |
 | Sign-off — accounts, auth, MFA, UI | ❌ **not started** — this is the next work |
@@ -135,12 +135,17 @@ explains itself better with the history attached.
 3. **Caller-supplied fields are not scopes.** `site_id` is caller-supplied, which is
    why `org_id` exists and why both `VALIDATE_Input` nodes ignore it in the request
    body.
-4. **The committed artifact and the live workflow can diverge.** Three instances so
-   far: a stale workflow name, a UI-only node rename, and `settings.errorWorkflow`
-   which the artifact carries but which arrived **blank** in n8n after import. A
-   structural assertion proves what the file says, never what the running system
-   does — so anything set via workflow *settings* needs confirming in the UI after
-   every import.
+4. **The committed artifact and the live workflow can diverge.** Two confirmed
+   instances: a stale workflow name and a UI-only node rename. A structural assertion
+   proves what the file says, never what the running system does.
+   ⚠️ A third instance was *claimed* here — `settings.errorWorkflow` "arriving blank
+   after import" — and it was **wrong**. The id was stored correctly all along; the
+   field rendered blank because the *target* workflow contained no node of type
+   `errorTrigger`, so n8n could not offer it in the list and therefore could not
+   display it. Layer 2 was configured and silently doing nothing. Fixed in
+   `agentic-dev-stack` PR #745. The wrong diagnosis is recorded because it cost three
+   rounds of testing, and because "the artifact must be lying" is a seductive
+   explanation that stops you looking at the thing being referenced.
 5. **`new URL()` throws in the n8n Code node.** The offline harnesses shadow `URL`,
    `Buffer`, `process` and `fetch` as undefined to reproduce that.
 6. **Telegram rejects the whole message on an unsupported HTML tag.** The email
