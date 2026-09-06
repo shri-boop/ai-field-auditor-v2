@@ -22,7 +22,7 @@ as passing. An assertion that went green on them would be a lie.
 | 1. Input validation after Webhook | `VALIDATE_Input` / `VALIDATE_Query` → `ROUTE_*` → `RESPOND_BadRequest` (400) |
 | 2. Error path on every failable node | every Code node `continueErrorOutput`; every Postgres retries; notifiers tolerate |
 | 3. Retry logic | HTTP `retryOnFail` + timeout everywhere; Postgres `retryOnFail` everywhere |
-| 5. One central Error Handler | `ERROR_Handler` → `RESPOND_Error`, one per workflow |
+| 5. One central Error Handler | `ERROR_Handler` → `RESPOND_Error` → `BUILD_ErrorAlert` → `CALL_ErrorHandler`, one per workflow |
 | 7. No silent failures | asserted by graph traversal in all three workflows |
 | 8. Switch `fallbackOutput: extra` | all four routers, **and the extra output is wired** |
 | Pre-return #2 unique ids, #3 no orphans, #5 `contentType: raw`, #7 no control chars, #10 credential ids | asserted |
@@ -177,22 +177,117 @@ crash and the Slack/branding issues landed in that repo's PR #737).
 n8n invokes it on any **unhandled** failure, including ones no in-workflow path can
 reach. It logs to `error_log`, asks an LLM to diagnose, and alerts on three channels.
 
-### ⚠️ `errorWorkflow` did not survive the import
+### ⚠️ Why the Error Workflow field looked blank — the import was NOT the cause
 
-The artifacts carry `settings.errorWorkflow`, and `test_production_ready.mjs` asserts
-it. After re-importing all three workflows the field in n8n's **Settings → Error
-Workflow** was **blank** in every one of them — neither the id nor the name.
+**An earlier version of this section blamed the import. That was wrong twice over, and
+the record is kept here because the wrong diagnosis cost three rounds of testing.**
 
-So Layer 2 is **not active** until it is set in the UI, and the assertion that
-"errorWorkflow points at the shared Error_Handler" proves only what the file says.
-That is the third time an artifact has disagreed with the running workflow in this
-project, after the stale workflow name and the UI-only node rename, and it is the
-clearest statement yet of the limit: **a structural assertion on a committed artifact
-cannot prove anything about the live system.**
+The field rendered blank in all three workflows, and the actual cause was in the
+*target*: `Error_Handler`'s only trigger was an `executeWorkflowTrigger` that somebody
+had **renamed** to "Error Trigger". n8n populates Settings → Error Workflow by scanning
+for a node of *type* `n8n-nodes-base.errorTrigger`, so `Error_Handler` was never in the
+list, and the UI cannot display a selection that is not in the list it just built.
 
-Until the shape n8n actually persists is known, treat this setting as manual: after
-any import, open each workflow's Settings and confirm Error Workflow reads
-`Error_Handler`.
+The id *was* stored in `settings.errorWorkflow` the whole time. So Layer 2 was
+**configured and silently doing nothing**, which is strictly worse than being
+unconfigured, because everything looked wired.
+
+Tell the two node types apart in the n8n UI by the Parameters panel: a real Error
+Trigger has **no parameters**, while `Input data mode: Accept all data` is
+`executeWorkflowTrigger`'s `inputSource: passthrough`.
+
+Fixed in `agentic-dev-stack` **PR #745**, which *adds* a real `errorTrigger`
+(`ERROR_Trigger_Native`) alongside the sub-workflow trigger rather than replacing it —
+94 workflows call `Error_Handler` through the `executeWorkflow` path, including
+`CALL_ErrorHandler` below.
+
+🔴 **Do not open Workflow Settings and re-save to "fix" a blank field.** A blank
+selection can be written back and wipe a working id.
+
+The general lesson stands even though this instance was not an import problem: **a
+structural assertion on a committed artifact cannot prove anything about the live
+system.**
+
+### 🔴 Layer 2 alone alerts nobody — n8n only runs it on a FAILED execution
+
+n8n invokes `settings.errorWorkflow` only when an execution ends in status *error*. A
+node with `onError: continueErrorOutput` whose error branch completes leaves the
+execution **successful**.
+
+Every pre-response node in all three workflows routes its error output to
+`ERROR_Handler`. So **every failure these workflows are designed to survive ends as a
+successful execution, and Layer 2 is never invoked for any of them.**
+
+Measured on the live India workflow, the only *reachable* nodes that can fail uncaught
+are:
+
+| Node | Type | Can it realistically fail? |
+|---|---|---|
+| `Webhook` | webhook | payload limits |
+| `ROUTE_Validation`, `IF_NonCompliant` | switch / if | rarely |
+| `Respond_to_Webhook1`, `RESPOND_BadRequest`, `RESPOND_Error` | respondToWebhook | rarely |
+| `ERROR_Handler` | code | backstop if the handler itself dies |
+
+`DOWNLOAD_Image` and `EXTRACT_Base64` — the two genuinely likely failure points — are
+both **disabled and orphaned**, so they can never run. An earlier draft of this
+document listed them as Layer 2's realistic coverage; that was a reading of node
+settings without checking reachability.
+
+**Two further traps when testing this:**
+
+- Error workflows do **not** fire on *manual* executions, only production ones. The
+  editor's Execute button and the `/webhook-test/...` URL both count as manual.
+- A forced `throw` in `SHAPE_Response` is *caught*, so it will never trigger Layer 2.
+  That is correct behaviour, not a bug.
+
+### Layer 2b — `CALL_ErrorHandler`, which is what actually alerts (Part B)
+
+Because of the above, the error path used to end at the caller:
+
+```
+ERROR_Handler -> RESPOND_Error -> nothing
+```
+
+A vision outage, a parse drift, a database outage or a validator crash produced a clean
+HTTP 500 for whoever was using the dashboard and **total silence for the operator** —
+no `error_log` row, no Telegram, no Slack. All three workflows now end:
+
+```
+ERROR_Handler -> RESPOND_Error -> BUILD_ErrorAlert -> CALL_ErrorHandler
+```
+
+| Property | Value | Why |
+|---|---|---|
+| Placement | **downstream of** `RESPOND_Error` | Guarantees the caller is answered first. A second branch off `ERROR_Handler` would be ordered by n8n's execution-order heuristics, and correctness that depends on canvas position is not correctness. |
+| `waitForSubWorkflow` | `false` | The diagnosis takes 10–30 s. Waiting would hold this execution and a worker slot open long after the caller was answered. |
+| `onError` | `continueRegularOutput` | A hard failure here would end the execution in status *error* **after** responding, which would then fire the native trigger and log the failure as `CALL_ErrorHandler`, masking the real error. |
+| `retryOnFail` | **explicitly `false`** | `POST_RESPONSE_TOLERANT` sets retry for a transient Telegram 429. A retried `CALL_ErrorHandler` re-runs the LLM diagnosis and all three alert nodes → two `error_log` rows and two Telegram messages for one failure. |
+| Outgoing connections | **none** | One response per execution; nothing downstream may be a responder. |
+| `RESPOND_Error.alwaysOutputData` | `true` | What a `respondToWebhook` node emits is not assumed anywhere in this repo. This guarantees an item so the chain cannot silently stall. |
+
+`BUILD_ErrorAlert` reads `$('ERROR_Handler')` **by name, not `$json`** — so it does not
+matter what `RESPOND_Error` passes through. That is the same class of bug that made
+`audit_id` come back `null` on the first live error test, when `ERROR_Handler` read
+`$json` and received `LOG_Audit`'s row echo.
+
+It maps identity onto `error_log`'s generic columns:
+
+| `error_log` column | Source | India example |
+|---|---|---|
+| `run_id` | `audit_id` | `FA-IN-20260906-0538023E-L2JQH` |
+| `client_id` | `site_id` | `SITE-MUM-563` |
+| `execution_url` | `$workflow.id` + `$execution.id` | link straight to the failed run |
+
+History has neither, and honestly reports `unknown` rather than inventing an
+identifier. The resulting alert reads `Source: executeWorkflow`, which distinguishes a
+*caught* failure something chose to report from an *uncaught* crash
+(`Source: errorTrigger`).
+
+`shared_error_alert.js` is **one file used verbatim by all three workflows**, for the
+same reason `shared_error_handler.js` is. `test_production_ready.mjs` executes it and
+asserts the emitted **key set** exactly matches what `GENERATE_ErrorID` reads — a field
+named even slightly wrong does not error, it silently logs `unknown`, which is the
+failure mode this whole workstream began with.
 
 ### Why it is not called inline
 

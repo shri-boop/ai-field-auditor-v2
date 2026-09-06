@@ -661,7 +661,47 @@
       "position": [
         -624,
         800
-      ]
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * BUILD_ErrorAlert — turns a CAUGHT error into the payload the shared Error_Handler\n * workflow expects.\n * Mode: Run Once for All Items\n *\n * ONE source file used verbatim by all three workflows (India, US, History), for the\n * same reason shared_error_handler.js is: the alert contract must not drift between\n * regions. Threaded in by patch_india_workflow.py, build_us_workflow.py and\n * build_history_workflow.py.\n *\n * ---------------------------------------------------------------------------\n * WHY THIS EXISTS AT ALL — THE GAP IT CLOSES\n * ---------------------------------------------------------------------------\n * n8n runs a workflow's `settings.errorWorkflow` ONLY when an execution ends in\n * status *error*. A node with onError: continueErrorOutput whose error branch\n * completes leaves the execution *successful*. Every failable node in these three\n * workflows routes its error output to ERROR_Handler, so every failure they are\n * designed to survive ends as a SUCCESSFUL execution — and the shared Error_Handler\n * is never invoked for any of them.\n *\n * The consequence, before this node existed: ERROR_Handler -> RESPOND_Error ->\n * nothing. The caller received a clean HTTP 500 with a structured body, and the\n * operator was told NOTHING. No error_log row, no Telegram, no Slack. A vision\n * outage, a parse drift, a database outage or a validator crash was visible only to\n * whoever happened to be using the dashboard at the time.\n *\n * Verified on the live India workflow: the only reachable nodes that could produce an\n * *uncaught* failure are the webhook, two routers, three responders and\n * ERROR_Handler itself. DOWNLOAD_Image and EXTRACT_Base64 — the two plausible\n * failure points — are both disabled AND orphaned, so they can never run. Registering\n * the errorWorkflow therefore covers almost nothing here on its own. This node is\n * what actually makes operator alerting work.\n *\n * ---------------------------------------------------------------------------\n * WHY IT SITS AFTER RESPOND_Error, NOT BESIDE IT\n * ---------------------------------------------------------------------------\n * The caller must be answered first. Downstream-of-the-responder is the only\n * placement that GUARANTEES that ordering: a second branch off ERROR_Handler would\n * be ordered by n8n's execution-order heuristics, and correctness that depends on\n * canvas position is not correctness.\n *\n * CALL_ErrorHandler then runs with waitForSubWorkflow: false, so the diagnosis is\n * genuinely fire-and-forget. That matters twice over: the caller has already been\n * answered, and this execution does not stay open holding a worker slot while an LLM\n * thinks for 10-30 s against an AUDIT_TIMEOUT_MS of 240 s.\n *\n * ---------------------------------------------------------------------------\n * WHY IT READS $('ERROR_Handler') AND NOT $json\n * ---------------------------------------------------------------------------\n * Its input comes from RESPOND_Error, and what a respondToWebhook node emits on its\n * output is NOT something this file is willing to assume. It might pass its input\n * through, it might emit the response body, it might emit nothing. Reading the\n * handler by name makes that question irrelevant — a class of bug this project has\n * already paid for once, when ERROR_Handler read $json and got LOG_Audit's row echo\n * instead of the audit, which is why audit_id came back null on a live failure.\n *\n * RESPOND_Error carries alwaysOutputData: true so that \"it might emit nothing\" cannot\n * silently stop this chain. An empty item still triggers this node, and this node\n * does not care what is in it.\n *\n * ---------------------------------------------------------------------------\n * THE FIELD NAMES ARE NOT NEGOTIABLE\n * ---------------------------------------------------------------------------\n * Error_Handler's GENERATE_ErrorID reads a FLAT payload: workflow_name, run_id,\n * client_id, error_node, error_message, error_type, execution_url. Those exact names.\n * Its other entry point — the native Error Trigger — receives a completely different\n * shape ({ execution: {...}, workflow: {...} }), and the flat branch is the one this\n * node targets, so the alert will correctly report Source: executeWorkflow rather\n * than errorTrigger. See agentic-dev-stack PR #745.\n *\n * run_id <- audit_id and client_id <- site_id are deliberate: error_log's own columns\n * are generic, and mapping our identity onto them is what makes a row traceable back\n * to one audit of one building instead of being a nameless stack trace. History has\n * no audit_id at all and honestly reports 'unknown'.\n */\n\n// The base URL is hardcoded rather than derived. A Code node has no reliable access\n// to n8n's public URL: $env is blocked by configuration on some deployments, and\n// there is no built-in that exposes it. A wrong link is worse than none, so if the\n// ids are unavailable this emits '' and Error_Handler omits the link line entirely\n// rather than printing a broken one.\nconst N8N_BASE_URL = 'https://n8n.kratuailabs.com';\n\n/**\n * `$('NodeName')` THROWS when the named node has not executed. That cannot happen on\n * this path — ERROR_Handler is the only way to reach RESPOND_Error — but an error\n * handler that threw while assembling an error report would manufacture the silent\n * failure this whole chain exists to prevent. So it is guarded, and the guard is not\n * silent: a lookup failure still produces a payload, one that says so.\n */\nlet handler = {};\nlet lookupNote = '';\ntry {\n  const rows = $('ERROR_Handler').all();\n  handler = (rows && rows[0] && rows[0].json) ? rows[0].json : {};\n} catch (e) {\n  lookupNote = String((e && e.message) || e).slice(0, 120);\n}\n\nfunction str(value, fallback) {\n  if (value === undefined || value === null) return fallback;\n  const out = String(value).trim();\n  return out === '' ? fallback : out;\n}\n\n// ------------------------------------------------------------- execution link\nlet execution_url = '';\ntry {\n  const wfId = (typeof $workflow !== 'undefined' && $workflow) ? $workflow.id : null;\n  const exId = (typeof $execution !== 'undefined' && $execution) ? $execution.id : null;\n  if (wfId && exId) {\n    execution_url = N8N_BASE_URL + '/workflow/' + wfId + '/executions/' + exId;\n  }\n} catch (e) {\n  execution_url = '';\n}\n\n// error_message is capped because it is bound into an INSERT and then into three\n// alert channels. Error_Handler's INSERT uses the array parameter form, so a comma in\n// here is safe — but an unbounded provider response body is not.\nconst error_message = str(handler.error_message || handler.error, 'Unknown error')\n  .slice(0, 2000);\n\nreturn [{\n  json: {\n    // ---- exactly the names Error_Handler.GENERATE_ErrorID reads ------------\n    workflow_name: str(handler.workflow_name, 'unknown'),\n    run_id: str(handler.audit_id, 'unknown'),\n    client_id: str(handler.site_id, 'unknown'),\n    error_node: str(handler.error_node, 'unknown'),\n    error_message: lookupNote\n      ? error_message + ' [BUILD_ErrorAlert could not read ERROR_Handler: ' + lookupNote + ']'\n      : error_message,\n    error_type: str(handler.error_type, 'WORKFLOW_ERROR'),\n    execution_url: execution_url\n  }\n}];\n"
+      },
+      "id": "ind-error-alert-0007",
+      "name": "BUILD_ErrorAlert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        800
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "iLRmjyuk5mq1hqkB",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "ind-call-error-handler-0008",
+      "name": "CALL_ErrorHandler",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [
+        -144,
+        800
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "retryOnFail": false
     }
   ],
   "connections": {
@@ -883,6 +923,28 @@
         [
           {
             "node": "RESPOND_Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BUILD_ErrorAlert": {
+      "main": [
+        [
+          {
+            "node": "CALL_ErrorHandler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RESPOND_Error": {
+      "main": [
+        [
+          {
+            "node": "BUILD_ErrorAlert",
             "type": "main",
             "index": 0
           }

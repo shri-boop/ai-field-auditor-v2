@@ -150,6 +150,86 @@ ERROR_HANDLER_FILE = "shared_error_handler.js"
 RESPOND_ERROR_NAME = "RESPOND_Error"
 RESPOND_ERROR_ID = "ind-respond-error-0006"
 
+# ---------------------------------------------------------------- Part B
+# Registering ERROR_WORKFLOW_ID above is NOT enough to alert anybody, and the reason
+# is worth stating where someone will read it:
+#
+#   n8n runs settings.errorWorkflow only when an execution ends in status *error*.
+#   Every node in PRE_RESPONSE_CODE_NODES has onError: continueErrorOutput, so its
+#   failure is CAUGHT, the error branch completes, RESPOND_Error answers, and the
+#   execution ends SUCCESSFUL. The shared Error_Handler is never invoked.
+#
+# So before these two nodes existed the chain was ERROR_Handler -> RESPOND_Error ->
+# nothing: the caller got a structured 500 and the operator got silence. No error_log
+# row, no Telegram, no Slack, for a vision outage or a database outage alike.
+#
+# Registering the errorWorkflow still matters — it catches genuinely uncaught crashes
+# — but in India it covers almost nothing, because the only reachable nodes that can
+# fail uncaught are the webhook, two routers, three responders and ERROR_Handler
+# itself. DOWNLOAD_Image and EXTRACT_Base64 are both disabled AND orphaned.
+#
+# CALL_ErrorHandler reaches the SAME shared workflow (iLRmjyuk5mq1hqkB) through its
+# executeWorkflow trigger, which is why that trigger had to be preserved rather than
+# replaced when the native errorTrigger was added — agentic-dev-stack PR #745.
+ERROR_ALERT_NAME = "BUILD_ErrorAlert"
+ERROR_ALERT_ID = "ind-error-alert-0007"
+ERROR_ALERT_FILE = "shared_error_alert.js"
+CALL_ERROR_HANDLER_NAME = "CALL_ErrorHandler"
+CALL_ERROR_HANDLER_ID = "ind-call-error-handler-0008"
+
+# Post-response AND must never be retried. harden_nodes gives POST_RESPONSE_TOLERANT
+# retryOnFail with maxTries 2, which is right for a Telegram 429 and WRONG here: a
+# retried CALL_ErrorHandler would run the whole diagnosis chain twice and produce two
+# error_log rows and two alerts for one failure. Retry is therefore explicitly OFF,
+# not merely absent, so a future edit has to argue with a comment before turning it on.
+POST_RESPONSE_NO_RETRY = [ERROR_ALERT_NAME, CALL_ERROR_HANDLER_NAME]
+
+
+def apply_post_response_no_retry(node):
+    """Tolerate failure, answer nobody, and never run twice.
+
+    Split out of harden_nodes because the nodes it applies to are created later in the
+    pipeline than harden_nodes runs — see the note there. Having ONE function means the
+    policy cannot drift between the creation path and the re-run path.
+    """
+    node["onError"] = "continueRegularOutput"
+    node["alwaysOutputData"] = True
+    # Explicitly False rather than absent. POST_RESPONSE_TOLERANT sets retryOnFail
+    # True with maxTries 2, which is correct for a Telegram 429 and actively harmful
+    # here: a retried CALL_ErrorHandler re-runs Error_Handler's LLM diagnosis and all
+    # three of its alert nodes, so one failure becomes two error_log rows and two
+    # Telegram messages.
+    node["retryOnFail"] = False
+
+
+def EXECUTE_ERROR_WORKFLOW_PARAMS():
+    """The executeWorkflow parameter block for calling the shared Error_Handler.
+
+    Copied from the shape already running in production rather than written from the
+    node's documentation: 50 workflows in agentic-dev-stack call iLRmjyuk5mq1hqkB with
+    exactly this typeVersion 1.1 / {workflowId, options} form, e.g.
+    workflows/n8n/agents/analytics/AA_Anomaly_Detector.json.
+
+    A typeVersion 1.3 variant also exists there (46 uses) carrying a `workflowInputs`
+    mapping block. It is NOT used here: Error_Handler's executeWorkflow trigger is set
+    to inputSource `passthrough` ("Accept all data"), which makes input mapping
+    inapplicable, and every 1.3 instance in that repo consequently carries an empty
+    `value: {}`. The 1.1 form expresses the same behaviour without the vestigial block.
+
+    waitForSubWorkflow: false is the load-bearing option. Error_Handler makes an LLM
+    diagnosis call taking 10-30 s; waiting for it would hold this execution — and a
+    worker slot — open long after the caller was answered, against an
+    AUDIT_TIMEOUT_MS of 240 s. Fire-and-forget is the entire point of the split.
+    """
+    return {
+        "workflowId": {
+            "__rl": True,
+            "value": ERROR_WORKFLOW_ID,
+            "mode": "id",
+        },
+        "options": {"waitForSubWorkflow": False},
+    }
+
 # Code nodes on the pre-response path. Each gets onError: continueErrorOutput so a
 # throw becomes a structured 500 instead of an aborted execution with no response.
 #
@@ -396,6 +476,16 @@ def harden_nodes(by_name):
         node["maxTries"] = 2
         node["waitBetweenTries"] = 3000
 
+    # ⚠️ The Part B nodes are NOT hardened here, and cannot be: harden_nodes runs
+    # before ensure_error_handler, so BUILD_ErrorAlert and CALL_ErrorHandler do not
+    # exist in by_name yet. They are hardened at the point of creation instead, by
+    # apply_post_response_no_retry(). This loop is kept for the case where a previous
+    # run already put them in the file, so a re-run cannot leave them un-hardened.
+    for name in POST_RESPONSE_NO_RETRY:
+        node = by_name.get(name)
+        if node is not None:
+            apply_post_response_no_retry(node)
+
 
 def ensure_error_handler(wf, by_name):
     """
@@ -471,6 +561,76 @@ def ensure_error_handler(wf, by_name):
     wf["connections"][ERROR_HANDLER_NAME] = {
         "main": [[{"node": RESPOND_ERROR_NAME, "type": "main", "index": 0}]]
     }
+
+    ensure_error_alert(wf)
+
+
+def find_node(wf, name):
+    for node in wf["nodes"]:
+        if node.get("name") == name:
+            return node
+    return None
+
+
+def ensure_error_alert(wf):
+    """
+    Part B: make a CAUGHT error actually reach an operator.
+
+        ERROR_Handler -> RESPOND_Error -> BUILD_ErrorAlert -> CALL_ErrorHandler
+
+    See the POST_RESPONSE_NO_RETRY block at the top of this file for why registering
+    settings.errorWorkflow does not achieve this on its own.
+
+    Placement is downstream of the responder, not a second branch off ERROR_Handler,
+    because only that GUARANTEES the caller is answered first. A parallel branch is
+    ordered by n8n's execution-order heuristics, and correctness that depends on
+    canvas position is not correctness.
+    """
+    if find_node(wf, ERROR_ALERT_NAME) is None:
+        wf["nodes"].append({
+            "parameters": {"jsCode": js(ERROR_ALERT_FILE)},
+            "id": ERROR_ALERT_ID,
+            "name": ERROR_ALERT_NAME,
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-384, 800],
+        })
+    else:
+        find_node(wf, ERROR_ALERT_NAME)["parameters"]["jsCode"] = js(ERROR_ALERT_FILE)
+
+    if find_node(wf, CALL_ERROR_HANDLER_NAME) is None:
+        wf["nodes"].append({
+            "parameters": EXECUTE_ERROR_WORKFLOW_PARAMS(),
+            "id": CALL_ERROR_HANDLER_ID,
+            "name": CALL_ERROR_HANDLER_NAME,
+            "type": "n8n-nodes-base.executeWorkflow",
+            "typeVersion": 1.1,
+            "position": [-144, 800],
+        })
+    else:
+        find_node(wf, CALL_ERROR_HANDLER_NAME)["parameters"] = EXECUTE_ERROR_WORKFLOW_PARAMS()
+
+    # RESPOND_Error must keep emitting an item, or this chain silently stops.
+    # What a respondToWebhook node outputs is not something this file assumes; see the
+    # header of shared_error_alert.js. alwaysOutputData guarantees an item exists, and
+    # BUILD_ErrorAlert reads $('ERROR_Handler') so it does not care what is in it.
+    for name in POST_RESPONSE_NO_RETRY:
+        apply_post_response_no_retry(find_node(wf, name))
+
+    responder = find_node(wf, RESPOND_ERROR_NAME)
+    if responder is not None:
+        responder["alwaysOutputData"] = True
+
+    wf["connections"][RESPOND_ERROR_NAME] = {
+        "main": [[{"node": ERROR_ALERT_NAME, "type": "main", "index": 0}]]
+    }
+    wf["connections"][ERROR_ALERT_NAME] = {
+        "main": [[{"node": CALL_ERROR_HANDLER_NAME, "type": "main", "index": 0}]]
+    }
+    # CALL_ErrorHandler is deliberately a LEAF. n8n permits one response per
+    # execution, so anything downstream of it must never be a responder, and there is
+    # nothing else for it to do.
+    wf["connections"].pop(CALL_ERROR_HANDLER_NAME, None)
 
 
 def apply_renames(wf):

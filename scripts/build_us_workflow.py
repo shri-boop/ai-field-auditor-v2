@@ -58,6 +58,52 @@ ERROR_WORKFLOW_ID = "iLRmjyuk5mq1hqkB"
 ERROR_HANDLER_NAME = "ERROR_Handler"
 RESPOND_ERROR_NAME = "RESPOND_Error"
 
+# ---------------------------------------------------------------- Part B
+# Registering ERROR_WORKFLOW_ID as settings.errorWorkflow does NOT alert anybody for
+# the failures this workflow is built to survive, and the reason belongs here:
+#
+#   n8n invokes settings.errorWorkflow only when an execution ends in status *error*.
+#   Every pre-response node here has onError: continueErrorOutput, so its failure is
+#   CAUGHT, the error branch runs, RESPOND_Error answers 500, and the execution ends
+#   SUCCESSFUL. The shared Error_Handler is never called.
+#
+# Before these two nodes, the error path was ERROR_Handler -> RESPOND_Error -> nothing:
+# the caller got a structured 500 and no operator was told anything at all. Vision
+# outage, code-basis resolution failure, parse drift, Postgres outage — all silent.
+#
+# CALL_ErrorHandler reaches the same shared workflow through its executeWorkflow
+# trigger, which is why that trigger was preserved rather than replaced when the native
+# errorTrigger was added (agentic-dev-stack PR #745).
+ERROR_ALERT_NAME = "BUILD_ErrorAlert"
+ERROR_ALERT_FILE = "shared_error_alert.js"
+CALL_ERROR_HANDLER_NAME = "CALL_ErrorHandler"
+
+# Post-response, and MUST NOT be retried — unlike POST_RESPONSE_TOLERANT, which sets
+# retryOnFail for a transient Telegram 429. Retrying CALL_ErrorHandler would re-run
+# Error_Handler's LLM diagnosis and all three of its alert nodes, turning one failure
+# into two error_log rows and two Telegram messages.
+POST_RESPONSE_NO_RETRY = [ERROR_ALERT_NAME, CALL_ERROR_HANDLER_NAME]
+
+
+def execute_error_workflow_params():
+    """The executeWorkflow block for calling the shared Error_Handler.
+
+    Taken from the shape already in production rather than from documentation: 50
+    workflows in agentic-dev-stack call iLRmjyuk5mq1hqkB with exactly this typeVersion
+    1.1 / {workflowId, options} form. A 1.3 variant there carries a `workflowInputs`
+    mapping block, but Error_Handler's trigger uses inputSource `passthrough`
+    ("Accept all data"), which makes mapping inapplicable — every 1.3 instance
+    consequently holds an empty `value: {}`.
+
+    waitForSubWorkflow: false is load-bearing. Error_Handler makes a 10-30 s LLM call;
+    waiting would hold this execution and a worker slot open long after the caller was
+    answered, against an AUDIT_TIMEOUT_MS of 240 s.
+    """
+    return {
+        "workflowId": {"__rl": True, "value": ERROR_WORKFLOW_ID, "mode": "id"},
+        "options": {"waitForSubWorkflow": False},
+    }
+
 # Code nodes on the pre-response path get onError: continueErrorOutput so a throw
 # becomes a structured 500 rather than an aborted run with no response at all.
 PRE_RESPONSE_CODE_NODES = [
@@ -438,6 +484,28 @@ def build():
         "type": "n8n-nodes-base.respondToWebhook",
         "typeVersion": 1,
         "position": [560, 900],
+        # Guarantees an item on the output so the Part B chain below cannot silently
+        # stop. What a respondToWebhook node emits is not something this build
+        # assumes — see the header of scripts/nodes/shared_error_alert.js — and
+        # BUILD_ErrorAlert reads $('ERROR_Handler') rather than $json, so an empty
+        # item is harmless.
+        "alwaysOutputData": True,
+    })
+
+    # ------------------------------------------------------------------- Part B
+    # Placed downstream of the responder, not as a second branch off ERROR_Handler,
+    # because only that GUARANTEES the caller is answered first. A parallel branch is
+    # ordered by n8n's execution-order heuristics, and correctness that depends on
+    # canvas position is not correctness.
+    nodes.append(code_node("us-erroralert-0024", ERROR_ALERT_NAME,
+                           ERROR_ALERT_FILE, [780, 900]))
+    nodes.append({
+        "parameters": execute_error_workflow_params(),
+        "id": "us-callerrh-0025",
+        "name": CALL_ERROR_HANDLER_NAME,
+        "type": "n8n-nodes-base.executeWorkflow",
+        "typeVersion": 1.1,
+        "position": [1000, 900],
     })
 
     # ------------------------------------------------------------- documentation
@@ -612,6 +680,20 @@ def build():
         connections[name] = {"main": main}
 
     connections[ERROR_HANDLER_NAME] = {"main": main_to(RESPOND_ERROR_NAME)}
+
+    # Part B. CALL_ErrorHandler is deliberately a LEAF: n8n permits one response per
+    # execution, so nothing downstream of it may be a responder, and it has no other
+    # job once the sub-workflow has been handed the payload.
+    connections[RESPOND_ERROR_NAME] = {"main": main_to(ERROR_ALERT_NAME)}
+    connections[ERROR_ALERT_NAME] = {"main": main_to(CALL_ERROR_HANDLER_NAME)}
+
+    for name in POST_RESPONSE_NO_RETRY:
+        node = by_name[name]
+        node["onError"] = "continueRegularOutput"
+        node["alwaysOutputData"] = True
+        # Explicitly False, not absent, so a future edit has to argue with this
+        # comment before enabling it. See POST_RESPONSE_NO_RETRY above.
+        node["retryOnFail"] = False
 
     # --------------------------------------------------------------- assertions
     # n8n silently misbehaves on duplicate node ids, and duplicate names break
