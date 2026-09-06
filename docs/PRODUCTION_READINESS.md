@@ -177,6 +177,23 @@ crash and the Slack/branding issues landed in that repo's PR #737).
 n8n invokes it on any **unhandled** failure, including ones no in-workflow path can
 reach. It logs to `error_log`, asks an LLM to diagnose, and alerts on three channels.
 
+### ⚠️ `errorWorkflow` did not survive the import
+
+The artifacts carry `settings.errorWorkflow`, and `test_production_ready.mjs` asserts
+it. After re-importing all three workflows the field in n8n's **Settings → Error
+Workflow** was **blank** in every one of them — neither the id nor the name.
+
+So Layer 2 is **not active** until it is set in the UI, and the assertion that
+"errorWorkflow points at the shared Error_Handler" proves only what the file says.
+That is the third time an artifact has disagreed with the running workflow in this
+project, after the stale workflow name and the UI-only node rename, and it is the
+clearest statement yet of the limit: **a structural assertion on a committed artifact
+cannot prove anything about the live system.**
+
+Until the shape n8n actually persists is known, treat this setting as manual: after
+any import, open each workflow's Settings and confirm Error Workflow reads
+`Error_Handler`.
+
 ### Why it is not called inline
 
 It makes an LLM diagnosis call. On the response path that would cost the caller 10–30

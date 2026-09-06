@@ -247,6 +247,83 @@ section('=== shared error handler source ===');
     /advisory_only: true/.test(src));
 }
 
+// ===========================================================================
+section('=== error handler, executed against the shape n8n really provides ===');
+{
+  // These assertions exist because the first live test of this node returned
+  // error_node "unknown" and audit_id null. n8n hands the error branch an item whose
+  // `error` is a plain STRING, and that item is the FAILING node's input — so when
+  // SHAPE_Response fails, the item is LOG_Audit's row echo, which carries neither
+  // the audit id nor the site id. Structural assertions on the source could not have
+  // caught either gap; only running it could.
+  const src = readFileSync(join(REPO, 'scripts', 'nodes', 'shared_error_handler.js'), 'utf8');
+  const ABSENT = ['URL', 'URLSearchParams', 'require', 'process', 'fetch', 'Buffer',
+                  'TextEncoder', 'structuredClone'];
+  const fn = new Function('$input', '$', '$env', '$workflow', '$prevNode', ...ABSENT, src);
+  const items = (a) => ({ first: () => a[0], all: () => a, last: () => a[a.length - 1] });
+
+  function run(errItem, prevNode, validatorJson) {
+    const ref = (n) => {
+      if (validatorJson && n === 'VALIDATE_Input') return items([{ json: validatorJson }]);
+      // $('Node') throws in n8n when that node has not executed — the case that
+      // matters when the validator itself is what failed.
+      throw new Error('node not executed: ' + n);
+    };
+    return fn(items([errItem]), ref, {}, { name: 'AI_Field_Audit_V2' }, prevNode,
+      ...ABSENT.map(() => undefined))[0].json;
+  }
+
+  // The exact live case: SHAPE_Response threw, its input was LOG_Audit's row echo.
+  const real = run(
+    { json: { id: 4711, error: 'forced error-path test [line 44]' } },
+    { name: 'SHAPE_Response', outputIndex: 1 },
+    { audit_id: 'FA-IN-20260906-ABCD1234-XY9ZQ', site_id: 'SITE-BAN-009' });
+
+  check('names the failing node from $prevNode, not "unknown"',
+    real.error_node === 'SHAPE_Response', real.error_node);
+  check('records which output it arrived on, so a throw is distinguishable from a router fallback',
+    real.error_output_index === 1, String(real.error_output_index));
+  check('recovers audit_id from the validator when the error item lacks it',
+    real.audit_id === 'FA-IN-20260906-ABCD1234-XY9ZQ', String(real.audit_id));
+  check('recovers site_id the same way', real.site_id === 'SITE-BAN-009', String(real.site_id));
+  check('still reports the message when error is a plain string',
+    real.error === 'forced error-path test [line 44]', real.error);
+  check('reports the workflow name from $workflow',
+    real.workflow_name === 'AI_Field_Audit_V2', real.workflow_name);
+  check('emits success:false and status ERROR',
+    real.success === false && real.status === 'ERROR');
+  check('keeps advisory_only true on the failure path', real.advisory_only === true);
+
+  // The validator itself failing: $('VALIDATE_Input') throws, and the handler must
+  // absorb that rather than becoming a second failure.
+  const early = run(
+    { json: { error: 'boom' } },
+    { name: 'VALIDATE_Input', outputIndex: 1 },
+    null);
+  check('does not throw when the validator never ran', early.success === false);
+  check('reports null identity honestly rather than inventing one',
+    early.audit_id === null && early.site_id === null);
+  check('still names the failing node in that case',
+    early.error_node === 'VALIDATE_Input', early.error_node);
+
+  // A structured error object, which some node types do provide.
+  const structured = run(
+    { json: { error: { message: 'connection refused', name: 'NodeApiError' } } },
+    { name: 'QUERY_IND', outputIndex: 1 }, null);
+  check('prefers a structured error name as the code when one exists',
+    structured.code === 'NodeApiError', structured.code);
+  check('and reads the structured message', structured.error === 'connection refused');
+
+  // Absolute worst case: nothing usable at all. It must still produce a response.
+  const empty = run({ json: {} }, null, null);
+  check('produces a usable response even with no error information at all',
+    empty.success === false && typeof empty.error === 'string' && empty.error.length > 0,
+    empty.error);
+  check('falls back to "unknown" for the node rather than throwing',
+    empty.error_node === 'unknown');
+  check('never emits an undefined timestamp', typeof empty.timestamp === 'string');
+}
+
 console.log('\n' + '='.repeat(64));
 console.log('PASS: ' + pass + '   FAIL: ' + fail);
 if (fail) { console.log('\nFAILURES'); failures.forEach((f) => console.log('  - ' + f)); }
