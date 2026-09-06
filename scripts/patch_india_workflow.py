@@ -131,6 +131,42 @@ ROUTE_NODE_ID = "ind-route-validation-0002"
 RESPOND_400_NAME = "RESPOND_BadRequest"
 RESPOND_400_ID = "ind-respond-badrequest-0003"
 
+# ------------------------------------------------- production hardening
+# The shared Error_Handler workflow in n8n, owned by agentic-dev-stack and reused
+# unmodified. Registered as this workflow's errorWorkflow so n8n invokes it on ANY
+# unhandled failure -- including ones no in-workflow path can reach, such as the
+# workflow being unable to start.
+#
+# It is deliberately NOT called inline. It makes an LLM diagnosis call, and on the
+# response path that would cost the caller 10-30 s while AUDIT_TIMEOUT_MS is 240 s;
+# it would also fail in the exact case it is most needed, since OpenRouter going
+# down is the most likely failure here. Asynchronous is the only correct place for
+# it. See scripts/nodes/shared_error_handler.js for the synchronous half.
+ERROR_WORKFLOW_ID = "iLRmjyuk5mq1hqkB"
+
+ERROR_HANDLER_NAME = "ERROR_Handler"
+ERROR_HANDLER_ID = "ind-error-handler-0005"
+ERROR_HANDLER_FILE = "shared_error_handler.js"
+RESPOND_ERROR_NAME = "RESPOND_Error"
+RESPOND_ERROR_ID = "ind-respond-error-0006"
+
+# Code nodes on the pre-response path. Each gets onError: continueErrorOutput so a
+# throw becomes a structured 500 instead of an aborted execution with no response.
+#
+# NOT in this list, deliberately: NOTIFY_OpsManager. It sits on the notification
+# branch AFTER Respond_to_Webhook1 has answered, and n8n allows one response per
+# execution -- routing it to RESPOND_Error would raise "Webhook response already
+# sent" and turn a lost alert into a failed run.
+PRE_RESPONSE_CODE_NODES = [
+    "VALIDATE_Input", "BUILD_Vision_Payload", "PARSE_Response", "SHAPE_Response",
+]
+
+# Post-response side effects. These continue on error and never reach a responder.
+# India previously had NO retry and NO onError on the notifiers, so a Telegram 429
+# aborted the execution -- on a CRITICAL finding, and when persisted is false the
+# alert is the only copy of it. US already had this; this brings India to parity.
+POST_RESPONSE_TOLERANT = ["NOTIFY_OpsManager", "SEND_Telegram", "SEND_Slack"]
+
 # ---------------------------------------------------------------- roadmap 7.6
 FALLBACK_NODE_NAME = "Vision_Fallback"
 FALLBACK_NODE_ID = "ind-vision-fallback-0004"
@@ -330,6 +366,113 @@ def ensure_shape_node(wf, by_name):
     }
 
 
+def harden_nodes(by_name):
+    """
+    Retry and error tolerance, per checklist items 2 and 3.
+
+    Two classes, and the distinction is what prevents a double-response bug:
+
+      pre-response Code nodes -> continueErrorOutput, wired to ERROR_Handler
+      post-response notifiers -> continueRegularOutput, wired nowhere
+
+    A node that fails before the caller has been answered must produce a response.
+    A node that fails after must not attempt one.
+    """
+    for name in PRE_RESPONSE_CODE_NODES:
+        node = by_name.get(name)
+        if node is None:
+            continue
+        node["onError"] = "continueErrorOutput"
+
+    for name in POST_RESPONSE_TOLERANT:
+        node = by_name.get(name)
+        if node is None:
+            continue
+        node["onError"] = "continueRegularOutput"
+        node["alwaysOutputData"] = True
+        # A transient 429 from Telegram is far more likely than an outage, and a
+        # life-safety alert is worth two attempts before it is given up on.
+        node["retryOnFail"] = True
+        node["maxTries"] = 2
+        node["waitBetweenTries"] = 3000
+
+
+def ensure_error_handler(wf, by_name):
+    """
+    Checklist items 5 and 7: exactly one central error handler, and no execution
+    path that fails to reach a Respond to Webhook node.
+
+    A Code node rather than a Set node, following the recorded rule that Set
+    assignments sometimes render empty after import. That bug is survivable
+    elsewhere; in the node responsible for reporting failures it would mean silently
+    reporting nothing.
+
+    RESPOND_Error answers 500, not 200-with-a-flag. A node that blew up IS a server
+    error, /api/audit passes the status through with the body intact, and a 5xx is
+    visible to every HTTP-level monitor whereas a 200 hides the failure from all of
+    them. The BODY follows the checklist's error shape.
+    """
+    source = js(ERROR_HANDLER_FILE)
+
+    if ERROR_HANDLER_NAME in by_name:
+        by_name[ERROR_HANDLER_NAME]["parameters"]["jsCode"] = source
+    else:
+        wf["nodes"].append({
+            "parameters": {"jsCode": source},
+            "id": ERROR_HANDLER_ID,
+            "name": ERROR_HANDLER_NAME,
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [-864, 800],
+        })
+
+    if RESPOND_ERROR_NAME not in by_name:
+        wf["nodes"].append({
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ success: false, "
+                                "error: $json.error, code: $json.code, "
+                                "timestamp: $json.timestamp, "
+                                "error_node: $json.error_node, "
+                                "workflow: $json.workflow_name, "
+                                "audit_id: $json.audit_id, "
+                                "advisory_only: true }) }}",
+                "options": {"responseCode": 500},
+            },
+            "id": RESPOND_ERROR_ID,
+            "name": RESPOND_ERROR_NAME,
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [-624, 800],
+        })
+
+    # Error output is index 1 on a node with continueErrorOutput.
+    for name in PRE_RESPONSE_CODE_NODES:
+        if name not in by_name:
+            continue
+        existing = wf["connections"].get(name, {}).get("main", [])
+        main = [list(existing[0]) if existing else []]
+        main.append([{"node": ERROR_HANDLER_NAME, "type": "main", "index": 0}])
+        wf["connections"][name] = {"main": main}
+
+    # Every Switch node's fallbackOutput must actually be connected. ROUTE_Validation
+    # declares fallbackOutput: extra, which n8n exposes as output index 2.
+    for node_name, node in by_name.items():
+        if node.get("type") != "n8n-nodes-base.switch":
+            continue
+        if (node.get("parameters", {}).get("options", {}) or {}).get("fallbackOutput") != "extra":
+            continue
+        outputs = int(node["parameters"].get("numberOutputs", 2))
+        existing = wf["connections"].get(node_name, {}).get("main", [])
+        main = [list(existing[i]) if i < len(existing) else [] for i in range(outputs)]
+        main.append([{"node": ERROR_HANDLER_NAME, "type": "main", "index": 0}])
+        wf["connections"][node_name] = {"main": main}
+
+    wf["connections"][ERROR_HANDLER_NAME] = {
+        "main": [[{"node": RESPOND_ERROR_NAME, "type": "main", "index": 0}]]
+    }
+
+
 def apply_renames(wf):
     """
     Rename nodes in place, preserving each node's id, and repoint every
@@ -386,7 +529,12 @@ def ensure_validation_nodes(wf, by_name):
                 "numberOutputs": 2,
                 # 0 = valid, 1 = rejected. Same expression as the US ROUTE_Validation.
                 "output": "={{ $json.validation_ok ? 0 : 1 }}",
-                "options": {},
+                # Checklist item 8. Without a fallback an unroutable value is
+                # silently dropped and NO response is ever sent -- a silent timeout,
+                # which item 7 forbids outright. The extra output goes to
+                # ERROR_Handler, so "the router did not recognise this" is reported
+                # rather than swallowed.
+                "options": {"fallbackOutput": "extra"},
             },
             "id": ROUTE_NODE_ID,
             "name": ROUTE_NODE_NAME,
@@ -395,9 +543,13 @@ def ensure_validation_nodes(wf, by_name):
             "position": [parse_pos[0] + 240, parse_pos[1]],
         })
     else:
+        # The update path must set everything the create path does, or a workflow
+        # that already exists silently misses whatever was added later. That is how
+        # fallbackOutput came to be declared for new installs and absent here.
         node = by_name[ROUTE_NODE_NAME]
         node["parameters"]["output"] = "={{ $json.validation_ok ? 0 : 1 }}"
         node["parameters"]["numberOutputs"] = 2
+        node["parameters"].setdefault("options", {})["fallbackOutput"] = "extra"
 
     if RESPOND_400_NAME not in by_name:
         wf["nodes"].append({
@@ -426,6 +578,10 @@ def ensure_validation_nodes(wf, by_name):
     wf["connections"]["VALIDATE_Input"] = {
         "main": [[{"node": ROUTE_NODE_NAME, "type": "main", "index": 0}]]
     }
+    # Three outputs, because fallbackOutput: extra adds one. Declaring the fallback
+    # in the parameters without WIRING it is worse than not declaring it: the output
+    # exists, looks handled on the canvas, and still drops the item into nothing.
+    # Output 2 is populated by ensure_error_handler(), which runs after this.
     wf["connections"][ROUTE_NODE_NAME] = {
         "main": [
             [{"node": "BUILD_Vision_Payload", "type": "main", "index": 0}],
@@ -544,17 +700,20 @@ def main():
         return 1
 
     wf["name"] = WORKFLOW_NAME
+    wf.setdefault("settings", {})["errorWorkflow"] = ERROR_WORKFLOW_ID
 
     patch_webhook_auth(by_name["Webhook"])
 
     for node_name, filename in JS_NODES.items():
         by_name[node_name]["parameters"]["jsCode"] = js(filename)
 
+    harden_nodes(by_name)
     patch_log_audit(by_name["LOG_Audit"])
     patch_if_node(by_name["IF_NonCompliant"])
     ensure_shape_node(wf, by_name)
     ensure_validation_nodes(wf, by_name)
     ensure_vision_resilience(wf, by_name)
+    ensure_error_handler(wf, by_name)
 
     if GMAIL_NODE in by_name:
         by_name[GMAIL_NODE]["parameters"]["sendTo"] = ALERT_RECIPIENT

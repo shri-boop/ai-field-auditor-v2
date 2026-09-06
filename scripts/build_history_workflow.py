@@ -24,6 +24,21 @@ OUT = os.path.join(REPO, "AI_Field_Audit_History.json")
 # Reused from the audit workflows so this imports ready-to-run on the same n8n.
 CRED_POSTGRES = {"postgres": {"id": "n7fXon6ujJTrnF7w", "name": "Postgres account"}}
 
+# ------------------------------------------------- production hardening
+# Shared Error_Handler workflow, owned by agentic-dev-stack, reused unmodified and
+# invoked asynchronously by n8n on any unhandled failure.
+ERROR_WORKFLOW_ID = "iLRmjyuk5mq1hqkB"
+ERROR_HANDLER_NAME = "ERROR_Handler"
+RESPOND_ERROR_NAME = "RESPOND_Error"
+
+# This workflow had the starkest gap of the three. QUERY_US and QUERY_IND are
+# Postgres reads with NO retry and NO onError, so a transient connection blip
+# stopped the workflow outright and the Records lookup returned nothing at all --
+# no response, no error, just a hanging request until the proxy timed out. That is
+# checklist item 7 violated in the plainest possible way.
+PRE_RESPONSE_CODE_NODES = ["VALIDATE_Query", "SHAPE_Results"]
+PRE_RESPONSE_DB_NODES = ["QUERY_US", "QUERY_IND"]
+
 # Webhook Header Auth, header name x-audit-history-key, sent by
 # app/api/history/route.ts from HISTORY_API_KEY.
 #
@@ -293,7 +308,7 @@ def build():
                         },
                     ]
                 },
-                "options": {},
+                "options": {"fallbackOutput": "extra"},
             },
             "id": "0003-route",
             "name": "ROUTE_Query",
@@ -316,6 +331,29 @@ def build():
         query_node("0005-query-us", "QUERY_US", US_QUERY, [420, 300]),
         query_node("0006-query-ind", "QUERY_IND", IND_QUERY, [420, 480]),
         code_node("0007-shape", "SHAPE_Results", "history_02_shape_results.js", [660, 390]),
+        # Checklist items 5 and 7. A Code node, not a Set node, per the recorded
+        # rule that Set assignments sometimes render empty after import -- a bug
+        # that would be quietly catastrophic in the node that reports failures.
+        code_node("0009-errh", ERROR_HANDLER_NAME, "shared_error_handler.js", [660, 620]),
+        {
+            "parameters": {
+                "respondWith": "json",
+                "responseBody": "={{ JSON.stringify({ success: false, "
+                                "error: $json.error, code: $json.code, "
+                                "timestamp: $json.timestamp, "
+                                "error_node: $json.error_node, "
+                                "workflow: $json.workflow_name }) }}",
+                # 500 rather than 200-with-a-flag: a failed database read is a server
+                # error, the proxy passes the status through with the body, and a 5xx
+                # is visible to HTTP-level monitoring where a 200 is not.
+                "options": {"responseCode": 500},
+            },
+            "id": "0010-resperr",
+            "name": RESPOND_ERROR_NAME,
+            "type": "n8n-nodes-base.respondToWebhook",
+            "typeVersion": 1,
+            "position": [880, 620],
+        },
         {
             "parameters": {
                 "respondWith": "json",
@@ -375,6 +413,39 @@ def build():
         },
     }
 
+    # ------------------------------------------------- error routing (items 2, 5, 7)
+    by_name = {n["name"]: n for n in nodes}
+    err = [{"node": ERROR_HANDLER_NAME, "type": "main", "index": 0}]
+
+    for name in PRE_RESPONSE_CODE_NODES + PRE_RESPONSE_DB_NODES:
+        if name not in by_name:
+            continue
+        node = by_name[name]
+        node["onError"] = "continueErrorOutput"
+        if name in PRE_RESPONSE_DB_NODES:
+            # A transient blip is far more likely than an outage, so retry before
+            # reporting failure. Matches the database retry policy elsewhere.
+            node["retryOnFail"] = True
+            node["maxTries"] = 2
+            node["waitBetweenTries"] = 1000
+        existing = connections.get(name, {}).get("main", [])
+        connections[name] = {"main": [list(existing[0]) if existing else [], list(err)]}
+
+    for name, node in by_name.items():
+        if node.get("type") != "n8n-nodes-base.switch":
+            continue
+        if (node.get("parameters", {}).get("options", {}) or {}).get("fallbackOutput") != "extra":
+            continue
+        count = len(connections.get(name, {}).get("main", [])) or 3
+        existing = connections.get(name, {}).get("main", [])
+        main = [list(existing[i]) if i < len(existing) else [] for i in range(count)]
+        main.append(list(err))
+        connections[name] = {"main": main}
+
+    connections[ERROR_HANDLER_NAME] = {
+        "main": [[{"node": RESPOND_ERROR_NAME, "type": "main", "index": 0}]]
+    }
+
     return {
         "name": "AI_Field_Audit_History",
         "nodes": nodes,
@@ -382,7 +453,7 @@ def build():
         # Never ship active: the operator activates after binding credentials
         # and confirming the query against their own database.
         "active": False,
-        "settings": {"executionOrder": "v1"},
+        "settings": {"executionOrder": "v1", "errorWorkflow": ERROR_WORKFLOW_ID},
         "meta": {"instanceId": "kratu-aquila-history"},
         "tags": [],
     }
