@@ -34,6 +34,7 @@ multi-tenancy has to be designed for before it is needed.
 | US audit pipeline | ✅ live — same plus 9 jurisdictions, 9 equipment classes, OSHA overlay, SLA tiers |
 | Records / history | ✅ live — read-only lookup over both logs |
 | Webhook auth | ✅ all three require Header Auth; unauthenticated returns 403 |
+| Production hardening | ✅ central error handler, no silent paths, all switch fallbacks wired, `errorWorkflow` set — see [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) |
 | Sign-off — credential registry | ✅ `lib/credential-registry.mjs`, FL verified, everything else flagged stubs |
 | Sign-off — history table + write path | ✅ `field_audit_signoffs`, append-only, atomic row-locked `record_signoff()` |
 | Sign-off — accounts, auth, MFA, UI | ❌ **not started** — this is the next work |
@@ -149,7 +150,8 @@ explains itself better with the history attached.
 1. this section
 2. [`docs/IND_FIRE_AUDIT_WORKFLOW.md`](docs/IND_FIRE_AUDIT_WORKFLOW.md) — India §7 roadmap, §8 current state
 3. [`docs/US_FIRE_AUDIT_WORKFLOW.md`](docs/US_FIRE_AUDIT_WORKFLOW.md) — US §11 roadmap, §12 limitations
-4. [`docs/SIGNOFF_DESIGN.md`](docs/SIGNOFF_DESIGN.md) — the sign-off arc. §14 reviews §1–§13 against the real schema; §16 records what is untested; §17 settles tenancy
+4. [`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) — conformance against the workflow checklist, the deliberate deviations, and the one rule about post-response nodes that must not be broken
+5. [`docs/SIGNOFF_DESIGN.md`](docs/SIGNOFF_DESIGN.md) — the sign-off arc. §14 reviews §1–§13 against the real schema; §16 records what is untested; §17 settles tenancy
 
 Brand is locked: **KRATU AI Labs**, product **AQUILA**, tagline *"Intelligence,
 Engineered to Act."* — exact casing, keep the period. Constants in `lib/brand.ts`.

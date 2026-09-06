@@ -36,7 +36,8 @@
       "position": [
         -40,
         300
-      ]
+      ],
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -116,7 +117,9 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "fallbackOutput": "extra"
+        }
       },
       "id": "0003-route",
       "name": "ROUTE_Query",
@@ -166,7 +169,11 @@
           "name": "Postgres account"
         }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
     },
     {
       "parameters": {
@@ -190,7 +197,11 @@
           "name": "Postgres account"
         }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
     },
     {
       "parameters": {
@@ -203,6 +214,37 @@
       "position": [
         660,
         390
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * ERROR_Handler — the synchronous half of error handling.\n * Mode: Run Once for All Items\n *\n * ONE source file, used verbatim by all three workflows (India, US, History), so\n * the error contract cannot drift between regions the way the notifier settings\n * did. Threaded in by patch_india_workflow.py, build_us_workflow.py and\n * build_history_workflow.py.\n *\n * ---------------------------------------------------------------------------\n * WHAT THIS IS FOR, AND WHAT IT IS NOT FOR\n * ---------------------------------------------------------------------------\n * This exists to answer the CALLER. Its entire job is to turn a node failure into\n * a structured response so no execution can end in silence — requirement 5 and 7\n * of the production checklist.\n *\n * It deliberately does NOT diagnose, log to a database, or send an alert. That is\n * the shared Error_Handler workflow's job (`settings.errorWorkflow`,\n * iLRmjyuk5mq1hqkB), which runs asynchronously after the caller already has a\n * response.\n *\n * The split is not tidiness, it is a latency and cost decision:\n *\n *   - The shared workflow makes an LLM diagnosis call. On the response path that\n *     costs a user 10-30 s before they learn anything, and AUDIT_TIMEOUT_MS is\n *     240 s, so a slow diagnosis converts a clean error into a proxy timeout.\n *   - If OpenRouter is what failed — the single most likely failure in this\n *     system — the diagnosis call fails too, in the exact case it was needed.\n *   - A ten-minute vision outage means a hundred failed audits. Error handling\n *     must not scale its cost with the size of the outage.\n *\n * So: respond here, cheaply and immediately. Diagnose there, later.\n *\n * ---------------------------------------------------------------------------\n * WHAT ROUTES HERE, AND WHAT MUST NEVER\n * ---------------------------------------------------------------------------\n * ROUTES HERE — anything on the path BEFORE the caller has been answered:\n *   every Code node's error output, every Switch node's fallbackOutput, and the\n *   History workflow's Postgres reads.\n *\n * MUST NEVER ROUTE HERE — anything on the notification branch AFTER the responder\n * has fired: SEND_Telegram, SEND_Slack, NOTIFY_OpsManager, the Gmail node. Those\n * carry `onError: continueRegularOutput` instead.\n *\n * The reason is concrete rather than stylistic: n8n permits exactly one response\n * per execution. A notifier failing after Respond_to_Webhook has already answered\n * would reach RESPOND_Error and n8n would throw \"Webhook response already sent\",\n * converting a lost Telegram message into a failed execution. That trades a minor\n * problem for a worse one.\n *\n * A consequence worth stating plainly: a Telegram send that fails after the\n * response is sent cannot be reported to the caller, and is currently only visible\n * in the n8n execution list. Surfacing it belongs to the execution-logging work\n * (checklist item 6), which will record `alert_sent` per channel.\n *\n * ---------------------------------------------------------------------------\n * WHY THIS IS A CODE NODE AND NOT A SET NODE\n * ---------------------------------------------------------------------------\n * The checklist asks for a \"Set node\". It is a Code node on purpose, following the\n * hard-won rule recorded in the same document: Set node assignments sometimes\n * render empty in the n8n UI after import even when the JSON looks correct.\n *\n * That failure mode is survivable in a content pipeline. Here it would mean the one\n * node responsible for reporting failures silently reporting nothing — the worst\n * possible node to have that bug in. A Code node's body is either present or it is\n * a syntax error, and `test_*.mjs` asserts byte equality between the JSON and this\n * file, so it cannot drift unnoticed.\n */\n\nconst item = $input.first() || {};\nconst j = item.json || {};\n\n/**\n * n8n's error output shape is not stable across node types and versions. It may\n * arrive as `error` (string or object), `$error`, or `error.message`, and the\n * failing node may appear at `error.node.name` or not at all.\n *\n * Read defensively and never throw. An error handler that throws while handling an\n * error produces exactly the silent failure it exists to prevent, so every branch\n * below has a fallback and none of them can raise.\n */\nfunction firstString(candidates, fallback) {\n  for (let i = 0; i < candidates.length; i++) {\n    const v = candidates[i];\n    if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 500);\n  }\n  return fallback;\n}\n\nconst raw = (j.error && typeof j.error === 'object') ? j.error\n          : (j.$error && typeof j.$error === 'object') ? j.$error\n          : {};\n\nconst error_message = firstString([\n  raw.message,\n  raw.description,\n  typeof j.error === 'string' ? j.error : null,\n  typeof j.$error === 'string' ? j.$error : null,\n  j.message\n], 'An unexpected error occurred while processing this request.');\n\n// The node name is best-effort here. Precise attribution is the shared\n// Error_Handler workflow's job — n8n hands IT the failing node directly, which is\n// something an in-workflow node cannot see reliably.\nconst error_node = firstString([\n  raw.node && typeof raw.node === 'object' ? raw.node.name : null,\n  typeof raw.node === 'string' ? raw.node : null,\n  raw.nodeName,\n  j.error_node\n], 'unknown');\n\nconst error_type = firstString([\n  raw.name,\n  raw.errorType,\n  j.error_type,\n  // A Switch node's fallbackOutput is not an exception: it means the routing value\n  // was one nobody anticipated. Naming it distinctly matters, because the fix is a\n  // different fix — the router needs a branch, not the failing node repairing.\n  j.validation_ok !== undefined ? 'UNROUTABLE_VALUE' : null\n], 'WORKFLOW_ERROR');\n\nconst workflow_name = typeof $workflow !== 'undefined' && $workflow && $workflow.name\n  ? String($workflow.name)\n  : 'unknown';\n\n// Carried through when the failure happened after VALIDATE_Input, so a support\n// request has something to quote and the row can be found later.\nconst audit_id = firstString([j.audit_id, raw.audit_id], null);\nconst site_id = firstString([j.site_id, raw.site_id], null);\n\nconst timestamp = new Date().toISOString();\n\nreturn [{\n  json: {\n    // ---- the response contract, per checklist item 4 ----------------------\n    success: false,\n    error: error_message,\n    code: error_type,\n    timestamp: timestamp,\n\n    // ---- what item 5 requires an error handler to capture ------------------\n    error_type: error_type,\n    error_node: error_node,\n    error_message: error_message,\n    workflow_name: workflow_name,\n\n    // ---- identity, where the failure happened late enough to have it -------\n    audit_id: audit_id,\n    site_id: site_id,\n\n    // This project does not certify anything, and an error is not an exception to\n    // that. A caller must not read a failed audit as an absent finding.\n    advisory_only: true,\n    status: 'ERROR'\n  }\n}];\n"
+      },
+      "id": "0009-errh",
+      "name": "ERROR_Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: $json.error, code: $json.code, timestamp: $json.timestamp, error_node: $json.error_node, workflow: $json.workflow_name }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "0010-resperr",
+      "name": "RESPOND_Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        620
       ]
     },
     {
@@ -259,6 +301,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "ERROR_Handler",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -284,6 +333,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "ERROR_Handler",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -292,6 +348,13 @@
         [
           {
             "node": "SHAPE_Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "ERROR_Handler",
             "type": "main",
             "index": 0
           }
@@ -306,6 +369,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "ERROR_Handler",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -317,13 +387,32 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "ERROR_Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ERROR_Handler": {
+      "main": [
+        [
+          {
+            "node": "RESPOND_Error",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     }
   },
   "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "errorWorkflow": "iLRmjyuk5mq1hqkB"
   },
   "meta": {
     "instanceId": "kratu-aquila-history"

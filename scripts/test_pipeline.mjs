@@ -630,11 +630,20 @@ section('9. Sandbox safety + regression: the exact request that failed in n8n');
   check('REGRESSION: response is valid JSON-serialisable',
     typeof JSON.stringify(replay.response) === 'string');
 
-  // The workflow must expose exactly two responder nodes: 200 and 400.
+  // Three responders now: 200 success, 400 bad input, 500 runtime failure.
+  //
+  // The 500 arrived with the production-hardening work. Before it, a Code node that
+  // threw aborted the execution and the caller got nothing at all until the proxy
+  // timed out — the silent failure the checklist forbids. It is a real 500 rather
+  // than a 200-with-an-error-flag because a node that blew up IS a server error,
+  // /api/audit passes the status through with the body intact, and a 5xx is visible
+  // to HTTP-level monitoring where a 200 hides the failure from all of it.
   const responders = wf.nodes.filter((n) => n.type === 'n8n-nodes-base.respondToWebhook');
-  check('workflow has both a 200 and a 400 responder', responders.length === 2, 'found ' + responders.length);
+  check('workflow has a 200, a 400 and a 500 responder', responders.length === 3, 'found ' + responders.length);
   const codes = responders.map((n) => n.parameters.options.responseCode).sort();
-  check('responder status codes are 200 and 400', codes.join(',') === '200,400', codes.join(','));
+  check('responder status codes are 200, 400 and 500', codes.join(',') === '200,400,500', codes.join(','));
+  check('the 500 responder is reached from the central error handler',
+    wf.connections.ERROR_Handler.main[0][0].node === 'RESPOND_Error');
 
   // Validation routing must exist and be wired to the 400 responder.
   const valRoute = wf.connections.ROUTE_Validation;

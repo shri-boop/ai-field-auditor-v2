@@ -43,6 +43,33 @@ CRED_SLACK = {"slackApi": {"id": "FERICzhUKPyyuxUt", "name": "Slack(Arvami Stack
 CRED_GMAIL = {"gmailOAuth2": {"id": "C0orKvBTXhFFkCxr", "name": "Advaita"}}
 
 FALLBACK_MODEL = "openai/gpt-4o"
+
+# ------------------------------------------------- production hardening
+# The shared Error_Handler workflow in n8n, owned by agentic-dev-stack and reused
+# unmodified. Registered as errorWorkflow so n8n invokes it on ANY unhandled
+# failure, including ones no in-workflow path can reach.
+#
+# NOT called inline: it makes an LLM diagnosis call, which on the response path
+# would cost the caller 10-30 s against a 240 s proxy timeout, and would fail in
+# the exact case it is most needed, since OpenRouter going down is the most likely
+# failure here. The synchronous half is scripts/nodes/shared_error_handler.js.
+ERROR_WORKFLOW_ID = "iLRmjyuk5mq1hqkB"
+
+ERROR_HANDLER_NAME = "ERROR_Handler"
+RESPOND_ERROR_NAME = "RESPOND_Error"
+
+# Code nodes on the pre-response path get onError: continueErrorOutput so a throw
+# becomes a structured 500 rather than an aborted run with no response at all.
+PRE_RESPONSE_CODE_NODES = [
+    "VALIDATE_Input", "RESOLVE_CodeBasis", "BUILD_Vision_Payload",
+    "PARSE_And_Score", "SHAPE_DbRow", "BUILD_Report", "SHAPE_Response",
+]
+
+# Post-response side effects. These continue on error and MUST never reach a
+# responder: n8n permits one response per execution, so a notifier failing after
+# Respond_to_Webhook already answered would raise "Webhook response already sent"
+# and convert a lost alert into a failed run.
+POST_RESPONSE_TOLERANT = ["SEND_Slack", "SEND_Telegram", "SEND_Email", "CREATE_WorkOrder"]
 DB_TABLE = "field_audit_us_logs"
 WEBHOOK_PATH = "audit-field-photo-us"
 
@@ -136,7 +163,9 @@ def build():
             "mode": "expression",
             "numberOutputs": 2,
             "output": "={{ $json.validation_ok ? 0 : 1 }}",
-            "options": {},
+            # Checklist item 8. An unroutable value with no fallback is dropped and
+            # NO response is sent -- the silent timeout item 7 forbids.
+            "options": {"fallbackOutput": "extra"},
         },
         "id": "us-routeval-0003",
         "name": "ROUTE_Validation",
@@ -266,7 +295,11 @@ def build():
             "numberOutputs": 5,
             # 0 CRITICAL | 1 DEFICIENT | 2 REINSPECT | 3 COMPLIANT | 4 SYSTEM_ERROR
             "output": "={{ $json.route_index }}",
-            "options": {},
+            # Checklist item 8, and it matters more here than on ROUTE_Validation:
+            # route_index is computed from a derived status, so an unrecognised value
+            # means the verdict logic produced something the router does not know
+            # about. Dropping that silently is exactly the class of bug 7.1 fixed.
+            "options": {"fallbackOutput": "extra"},
         },
         "id": "us-route-0011",
         "name": "ROUTE_Outcome",
@@ -374,6 +407,39 @@ def build():
         "position": [340, 400],
     })
 
+    # ------------------------------------------------- central error handling
+    # Checklist items 5 and 7: exactly one error handler, and no path that fails to
+    # reach a responder.
+    #
+    # A Code node rather than a Set node, per the recorded rule that Set assignments
+    # sometimes render empty after import. Survivable elsewhere; in the node
+    # responsible for reporting failures it would mean silently reporting nothing.
+    nodes.append(code_node("us-errhandler-0022", ERROR_HANDLER_NAME,
+                           "shared_error_handler.js", [340, 900]))
+
+    nodes.append({
+        "parameters": {
+            "respondWith": "json",
+            "responseBody": "={{ JSON.stringify({ success: false, "
+                            "error: $json.error, code: $json.code, "
+                            "timestamp: $json.timestamp, "
+                            "error_node: $json.error_node, "
+                            "workflow: $json.workflow_name, "
+                            "audit_id: $json.audit_id, "
+                            "advisory_only: true }) }}",
+            # 500, not 200-with-a-flag. A node that blew up IS a server error,
+            # /api/audit passes the status through with the body intact, and a 5xx is
+            # visible to every HTTP-level monitor whereas a 200 hides it from all of
+            # them. The BODY follows the checklist's error shape.
+            "options": {"responseCode": 500},
+        },
+        "id": "us-responderr-0023",
+        "name": RESPOND_ERROR_NAME,
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [560, 900],
+    })
+
     # ------------------------------------------------------------- documentation
     nodes.append(sticky(
         "us-note-0018",
@@ -436,6 +502,9 @@ def build():
     def main(*targets):
         return [[{"node": t, "type": "main", "index": 0} for t in targets]]
 
+    def main_to(target):
+        return [[{"node": target, "type": "main", "index": 0}]]
+
     connections = {
         "Webhook": {"main": main("VALIDATE_Input")},
         "VALIDATE_Input": {"main": main("ROUTE_Validation")},
@@ -494,11 +563,55 @@ def build():
             ]
         },
         "SHAPE_Response": {"main": main("Respond_to_Webhook")},
+        # Terminal on purpose. These run AFTER Respond_to_Webhook has answered, and
+        # n8n permits one response per execution -- wiring them onward to
+        # RESPOND_Error would raise "Webhook response already sent" and turn a lost
+        # alert into a failed run. Their failure is the async Error_Handler
+        # workflow's business, and the execution log's (checklist item 6).
         "SEND_Slack": {"main": [[]]},
         "SEND_Telegram": {"main": [[]]},
         "SEND_Email": {"main": [[]]},
         "CREATE_WorkOrder": {"main": [[]]},
     }
+
+    # ------------------------------------------------- error routing (items 2, 5, 7)
+    by_name = {n["name"]: n for n in nodes}
+    err = [{"node": ERROR_HANDLER_NAME, "type": "main", "index": 0}]
+
+    # Pre-response Code nodes: a throw becomes a structured 500, not a dead run.
+    for name in PRE_RESPONSE_CODE_NODES:
+        if name not in by_name:
+            continue
+        by_name[name]["onError"] = "continueErrorOutput"
+        existing = connections.get(name, {}).get("main", [])
+        connections[name] = {"main": [list(existing[0]) if existing else [], list(err)]}
+
+    # Post-response notifiers: tolerate, retry, and never reach a responder.
+    for name in POST_RESPONSE_TOLERANT:
+        if name not in by_name:
+            continue
+        node = by_name[name]
+        node["onError"] = "continueRegularOutput"
+        node["alwaysOutputData"] = True
+        node.setdefault("retryOnFail", True)
+        node.setdefault("maxTries", 2)
+        node.setdefault("waitBetweenTries", 3000)
+
+    # Every Switch with fallbackOutput: extra exposes one extra output index, and
+    # declaring it without WIRING it is worse than not declaring it -- the output
+    # exists, looks handled on the canvas, and still drops the item into nothing.
+    for name, node in by_name.items():
+        if node.get("type") != "n8n-nodes-base.switch":
+            continue
+        if (node.get("parameters", {}).get("options", {}) or {}).get("fallbackOutput") != "extra":
+            continue
+        count = int(node["parameters"].get("numberOutputs", 2))
+        existing = connections.get(name, {}).get("main", [])
+        main = [list(existing[i]) if i < len(existing) else [] for i in range(count)]
+        main.append(list(err))
+        connections[name] = {"main": main}
+
+    connections[ERROR_HANDLER_NAME] = {"main": main_to(RESPOND_ERROR_NAME)}
 
     # --------------------------------------------------------------- assertions
     # n8n silently misbehaves on duplicate node ids, and duplicate names break
@@ -539,7 +652,10 @@ def build():
         "nodes": nodes,
         "connections": connections,
         "active": False,
-        "settings": {"executionOrder": "v1"},
+        # errorWorkflow hands every unhandled failure to the shared Error_Handler
+        # workflow, asynchronously, after the caller has already been answered by
+        # RESPOND_Error. The two halves are complementary, not alternatives.
+        "settings": {"executionOrder": "v1", "errorWorkflow": ERROR_WORKFLOW_ID},
         # ---------------------------------------------------------------------
         # NO pinData, deliberately.
         #
