@@ -161,14 +161,47 @@ const workflow_name = typeof $workflow !== 'undefined' && $workflow && $workflow
  * Both regions' validators are tried because this one file serves all three
  * workflows; History has no audit_id at all, and null is the honest answer there.
  */
+/**
+ * A first attempt at this used `$(name).first().json[field]` inside a try/catch and
+ * returned null on failure. On a live forced error it returned null even though
+ * VALIDATE_Input had demonstrably run and was listed among the node's inputs — and
+ * because the catch was silent, the reason was invisible.
+ *
+ * Two changes. Several access patterns are tried, because `.first()` resolves paired
+ * items and item pairing is exactly what an error branch breaks, whereas
+ * `.all()[0]` does not. And whatever goes wrong is now RECORDED rather than
+ * swallowed, so a failure explains itself on the next run instead of requiring
+ * another round of guessing.
+ *
+ * The try/catch is still correct: `$('NodeName')` throws when that node has not
+ * executed, which is the normal case when the validator itself is what failed. This
+ * is optional enrichment, and a handler that threw while reaching for a nicety would
+ * cause the silent failure it exists to prevent.
+ */
+const lookupNotes = [];
+
 function fromValidator(field) {
   const names = ['VALIDATE_Input', 'VALIDATE_Query'];
   for (let i = 0; i < names.length; i++) {
-    try {
-      const v = $(names[i]).first().json[field];
-      if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 200);
-    } catch (e) {
-      // That node did not run in this execution. Try the next.
+    const name = names[i];
+
+    // `.all()[0]` first: it does not go through paired-item resolution, which is the
+    // most likely reason the previous version failed inside an error branch.
+    const attempts = [
+      function () { return $(name).all()[0].json[field]; },
+      function () { return $(name).first().json[field]; },
+      function () { return $(name).item.json[field]; }
+    ];
+
+    for (let a = 0; a < attempts.length; a++) {
+      try {
+        const v = attempts[a]();
+        if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 200);
+        if (v !== undefined && v !== null) return String(v).slice(0, 200);
+        lookupNotes.push(name + '[' + a + ']:' + field + '=empty');
+      } catch (e) {
+        lookupNotes.push(name + '[' + a + ']:' + String((e && e.message) || e).slice(0, 90));
+      }
     }
   }
   return null;
@@ -197,6 +230,13 @@ return [{
     // ---- identity, where the failure happened late enough to have it -------
     audit_id: audit_id,
     site_id: site_id,
+
+    // Why the identity lookup failed, when it did. Present only on failure, so a
+    // successful run stays clean. This exists because a silent catch already cost
+    // one round of guessing about why audit_id came back null on a live error.
+    identity_lookup: (audit_id === null && lookupNotes.length)
+      ? lookupNotes.slice(0, 6).join(' | ')
+      : undefined,
 
     // This project does not certify anything, and an error is not an exception to
     // that. A caller must not read a failed audit as an absent finding.
