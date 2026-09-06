@@ -314,6 +314,37 @@ section('=== error handler, executed against the shape n8n really provides ===')
     structured.code === 'NodeApiError', structured.code);
   check('and reads the structured message', structured.error === 'connection refused');
 
+  // The identity lookup must try an access pattern that survives a broken error
+  // branch. `.first()` resolves paired items and an error output is exactly where
+  // pairing breaks, so `.all()[0]` is attempted first.
+  const pairedItemBroken = (() => {
+    const ref = (n) => {
+      if (n !== 'VALIDATE_Input') throw new Error('not executed: ' + n);
+      return {
+        all: () => [{ json: { audit_id: 'FA-IN-RECOVERED', site_id: 'SITE-R' } }],
+        first: () => { throw new Error('Cannot determine which item to use'); },
+        get item() { throw new Error('no paired item'); }
+      };
+    };
+    return fn(items([{ json: { error: 'boom' } }]), ref, {}, { name: 'W' },
+      { name: 'SHAPE_Response', outputIndex: 1 }, ...ABSENT.map(() => undefined))[0].json;
+  })();
+  check('recovers identity via .all()[0] when .first() cannot resolve a paired item',
+    pairedItemBroken.audit_id === 'FA-IN-RECOVERED', String(pairedItemBroken.audit_id));
+  check('a successful lookup leaves no debug noise in the response',
+    pairedItemBroken.identity_lookup === undefined, String(pairedItemBroken.identity_lookup));
+
+  // A silent catch already cost one round of guessing about why audit_id was null on
+  // a live error. When the lookup fails it must now say why.
+  const diagnosed = run({ json: { error: 'boom' } }, { name: 'SHAPE_Response', outputIndex: 1 }, null);
+  check('when identity cannot be recovered, the reason is reported',
+    typeof diagnosed.identity_lookup === 'string' && diagnosed.identity_lookup.length > 0,
+    String(diagnosed.identity_lookup));
+  check('the diagnosis names the node it tried',
+    /VALIDATE_Input/.test(diagnosed.identity_lookup || ''));
+  check('the diagnosis is bounded, so it cannot bloat the response',
+    (diagnosed.identity_lookup || '').split(' | ').length <= 6);
+
   // Absolute worst case: nothing usable at all. It must still produce a response.
   const empty = run({ json: {} }, null, null);
   check('produces a usable response even with no error information at all',
